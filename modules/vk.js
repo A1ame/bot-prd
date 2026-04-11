@@ -191,7 +191,8 @@ class VKBridge {
   // ─────────────────────────────────────────────
   async postToVk(text, photoBuffers = [], dedupeKey = null) {
     try {
-      if (dedupeKey && this.processedTgPosts.has(dedupeKey)) {
+      // Note: tg_ keys are managed by handleTelegramChannelPost, skip dedup check for them
+      if (dedupeKey && !dedupeKey.startsWith('tg_') && this.processedTgPosts.has(dedupeKey)) {
         logger.info(`postToVk: already processed ${dedupeKey}, skip`)
         return null
       }
@@ -287,14 +288,13 @@ class VKBridge {
   async handleTelegramChannelPost(msg) {
     try {
       logger.info(`TG->VK: handleTelegramChannelPost called, chat_id=${msg.chat.id}, msg_id=${msg.message_id}`)
-
       const postKey = `tg_${msg.chat.id}_${msg.message_id}`
       if (this.processedTgPosts.has(postKey)) {
-        logger.info(`TG->VK: duplicate, skip postKey=${postKey}`)
+        logger.info(`TG->VK: duplicate, skip`)
         return
       }
       this.processedTgPosts.add(postKey)
-      setTimeout(() => this.processedTgPosts.delete(postKey), 10 * 60 * 1000)
+      setTimeout(() => this.processedTgPosts.delete(postKey), 60 * 1000)
 
       const text = msg.text || msg.caption || ""
       const photoBuffers = []
@@ -306,15 +306,13 @@ class VKBridge {
           const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
           const buffer = await this.downloadFile(fileUrl)
           photoBuffers.push({ buffer, filename: "photo.jpg" })
-          logger.info(`TG->VK: downloaded photo for msg_id=${msg.message_id}`)
         } catch (err) {
           logger.error("handleTelegramChannelPost: error downloading photo:", err)
         }
       }
 
-      logger.info(`TG->VK: calling postToVk, text_len=${text.length}, photos=${photoBuffers.length}`)
-      const result = await this.postToVk(text, photoBuffers, postKey)
-      logger.info(`TG->VK: postToVk result=${result}`)
+      logger.info(`TG->VK: posting from channel ${msg.chat.id}, msg_id=${msg.message_id}`)
+      await this.postToVk(text, photoBuffers, postKey)
     } catch (error) {
       logger.error("Error in handleTelegramChannelPost:", error)
     }
