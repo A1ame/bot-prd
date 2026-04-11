@@ -23,6 +23,7 @@ class VKBridge {
     this.bot = bot
     this.vkToken = config.vkToken
     this.vkGroupId = config.vkGroupId
+    this.vkUserToken = config.vkUserToken || process.env.VK_USER_TOKEN || null  // пользовательский токен для загрузки фото
 
     // Дедупликация
     this.processedVkPosts = new Set()
@@ -45,11 +46,13 @@ class VKBridge {
   // ─────────────────────────────────────────────
   // VK API helper
   // ─────────────────────────────────────────────
-  async vkApi(method, params = {}) {
+  async vkApi(method, params = {}, useUserToken = false) {
     return new Promise((resolve, reject) => {
+      // photos.* методы требуют пользовательский токен
+      const token = (useUserToken && this.vkUserToken) ? this.vkUserToken : this.vkToken
       const query = new URLSearchParams({
         ...params,
-        access_token: this.vkToken,
+        access_token: token,
         v: "5.131",
       }).toString()
 
@@ -137,14 +140,19 @@ class VKBridge {
   // ─────────────────────────────────────────────
   async uploadPhotoToVk(fileBuffer, filename = "photo.jpg") {
     try {
-      const uploadServer = await this.vkApi("photos.getWallUploadServer", { group_id: this.vkGroupId })
+      if (!this.vkUserToken) {
+        logger.warn("uploadPhotoToVk: VK_USER_TOKEN not set — photo upload skipped. Add VK_USER_TOKEN to .env")
+        return null
+      }
+      // photos.getWallUploadServer и photos.saveWallPhoto требуют пользовательский токен
+      const uploadServer = await this.vkApi("photos.getWallUploadServer", { group_id: this.vkGroupId }, true)
       const uploaded = await this.multipartUpload(uploadServer.upload_url, fileBuffer, filename)
       const saved = await this.vkApi("photos.saveWallPhoto", {
         group_id: this.vkGroupId,
         photo: uploaded.photo,
         server: uploaded.server,
         hash: uploaded.hash,
-      })
+      }, true)
       return `photo${saved[0].owner_id}_${saved[0].id}`
     } catch (error) {
       logger.error("Error uploading photo to VK:", error)
