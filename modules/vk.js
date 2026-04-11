@@ -1,12 +1,13 @@
 /**
  * VK Bridge Module
- * Использует VK Long Poll API (groups.getLongPollServer) — работает с групповым токеном.
  *
  * Логика:
  * 1. TG канал → новый пост → публикуется на стену ВК
  * 2. ВК стена → новый пост (wall_post_new) → дублируется в TG каналы
+ *    Источник: Long Poll (реалтайм) + периодический wall.get (резервный)
  * 3. ВК предложка (post_type === "suggest") → уведомление в TG админу
- * 4. Админ принимает в TG → пост идёт и в TG, и на стену ВК
+ *    Источник: Long Poll + периодический wall.get?filter=suggests (резервный)
+ * 4. Админ принимает в TG → публикует существующий предложенный пост ВК + дублирует в TG
  */
 
 const https = require("https")
@@ -20,12 +21,19 @@ class VKBridge {
     this.vkToken = config.vkToken
     this.vkGroupId = config.vkGroupId
 
-    // Кэш дедупликации (TG→VK→TG защита)
+    // Дедупликация (защита от двойного постинга TG→VK→TG)
     this.processedVkPosts = new Set()
     this.processedTgPosts = new Set()
 
-    // Хранилище предложений из ВК ожидающих решения
+    // Предложения из ВК, ожидающие решения админа
+    // Map<postId, { status, text, photoUrls, authorInfo, post }>
     this.pendingVkSuggestions = new Map()
+
+    // Отслеживание обработанных предложок (чтобы polling не дублировал)
+    this.handledSuggestIds = new Set()
+
+    // ID последнего известного поста на стене (для резервного polling)
+    this.lastKnownWallPostId = null
 
     // Long Poll состояние
     this.lpServer = null
@@ -220,7 +228,7 @@ class VKBridge {
 
       if (dedupeKey) {
         this.processedTgPosts.add(dedupeKey)
-        // Сохраняем VK post_id чтобы Long Poll не вернул его в TG
+        // Помечаем VK post_id чтобы Long Poll не вернул его обратно в TG
         this.processedVkPosts.add(result.post_id)
         setTimeout(() => {
           this.processedTgPosts.delete(dedupeKey)
@@ -249,8 +257,9 @@ class VKBridge {
         return
       }
 
-      if (dedupeKey && this.processedVkPosts.has(dedupeKey)) {
-        logger.info(`Already processed ${dedupeKey}, skipping TG post`)
+      const key = dedupeKey !== null ? String(dedupeKey) : null
+      if (key && this.processedVkPosts.has(key)) {
+        logger.info(`Already processed vk_post=${key}, skipping TG post`)
         return
       }
 
@@ -280,9 +289,9 @@ class VKBridge {
         }
       }
 
-      if (dedupeKey) {
-        this.processedVkPosts.add(dedupeKey)
-        setTimeout(() => this.processedVkPosts.delete(dedupeKey), 10 * 60 * 1000)
+      if (key) {
+        this.processedVkPosts.add(key)
+        setTimeout(() => this.processedVkPosts.delete(key), 10 * 60 * 1000)
       }
     } catch (error) {
       logger.error("Error posting to Telegram:", error)
@@ -317,6 +326,88 @@ class VKBridge {
       await this.postToVk(text, photoBuffers, postKey)
     } catch (error) {
       logger.error("Error in handleTelegramChannelPost:", error)
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // РЕЗЕРВНЫЙ POLLING: новые посты на стене ВК → TG
+  // Срабатывает если Long Poll не доставил событие
+  // ─────────────────────────────────────────────
+  async pollVkWallPosts() {
+    try {
+      const result = await this.vkApi("wall.get", {
+        owner_id: `-${this.vkGroupId}`,
+        filter: "owner",
+        count: 5,
+      })
+
+      if (!result || !result.items || result.items.length === 0) return
+
+      const latestPost = result.items[0]
+
+      // Первый запуск — просто запоминаем последний ID, не постим
+      if (this.lastKnownWallPostId === null) {
+        this.lastKnownWallPostId = latestPost.id
+        logger.info(`VK wall poll: initialized lastKnownWallPostId=${latestPost.id}`)
+        return
+      }
+
+      if (latestPost.id <= this.lastKnownWallPostId) return
+
+      // Найдены новые посты
+      const newPosts = result.items.filter(p => p.id > this.lastKnownWallPostId)
+      // Публикуем в хронологическом порядке (старый → новый)
+      newPosts.reverse()
+
+      for (const post of newPosts) {
+        const dedupe = String(post.id)
+        if (this.processedVkPosts.has(dedupe)) {
+          logger.info(`VK wall poll: skipping already-processed post id=${post.id}`)
+          continue
+        }
+        logger.info(`VK wall poll: new post id=${post.id}`)
+        const text = this.formatVkPostText(post)
+        const photoUrls = this.extractVkPhotoUrls(post)
+        await this.postToTelegram(text, photoUrls, dedupe)
+      }
+
+      this.lastKnownWallPostId = latestPost.id
+    } catch (error) {
+      logger.error("Error in pollVkWallPosts:", error)
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // РЕЗЕРВНЫЙ POLLING: предложки из ВК → TG админу
+  // Основной источник, т.к. Long Poll нестабильно
+  // доставляет предложенные посты
+  // ─────────────────────────────────────────────
+  async pollVkSuggests() {
+    try {
+      const result = await this.vkApi("wall.get", {
+        owner_id: `-${this.vkGroupId}`,
+        filter: "suggests",
+        count: 20,
+      })
+
+      if (!result || !result.items || result.items.length === 0) return
+
+      for (const post of result.items) {
+        if (
+          !this.handledSuggestIds.has(post.id) &&
+          !this.pendingVkSuggestions.has(post.id)
+        ) {
+          logger.info(`VK suggest poll: found new suggest id=${post.id}`)
+          await this.handleNewVkSuggest(post)
+        }
+      }
+    } catch (error) {
+      // Ошибка 15 = нет прав на просмотр предложек — логируем один раз
+      if (error.message && error.message.includes("15")) {
+        logger.warn("VK suggest poll: Access denied (error 15). Check group token permissions (wall scope needed).")
+      } else {
+        logger.error("Error in pollVkSuggests:", error)
+      }
     }
   }
 
@@ -374,22 +465,28 @@ class VKBridge {
         const post = obj.post || obj
 
         // Пропускаем посты, опубликованные нами
-        if (this.processedVkPosts.has(post.id)) {
+        if (this.processedVkPosts.has(String(post.id))) {
           logger.info(`Skipping own VK post id=${post.id}`)
           return
         }
 
         // Предложка
         if (post.post_type === "suggest") {
-          await this.handleNewVkSuggest(post)
+          if (!this.handledSuggestIds.has(post.id) && !this.pendingVkSuggestions.has(post.id)) {
+            await this.handleNewVkSuggest(post)
+          }
           return
         }
 
         // Обычный пост → в TG
-        logger.info(`New VK wall post: id=${post.id}`)
+        logger.info(`Long Poll: new VK wall post id=${post.id}`)
+        // Обновляем lastKnownWallPostId чтобы polling не задублировал
+        if (this.lastKnownWallPostId === null || post.id > this.lastKnownWallPostId) {
+          this.lastKnownWallPostId = post.id
+        }
         const text = this.formatVkPostText(post)
         const photoUrls = this.extractVkPhotoUrls(post)
-        await this.postToTelegram(text, photoUrls, post.id)
+        await this.postToTelegram(text, photoUrls, String(post.id))
       }
     } catch (error) {
       logger.error("Error handling VK update:", error)
@@ -402,6 +499,7 @@ class VKBridge {
   async handleNewVkSuggest(post) {
     try {
       if (this.pendingVkSuggestions.has(post.id)) return
+      // Временно помечаем "processing", чтобы параллельный polling не запустил дублирующую обработку
       this.pendingVkSuggestions.set(post.id, "processing")
 
       logger.info(`New VK suggest: id=${post.id}`)
@@ -467,6 +565,7 @@ class VKBridge {
         })
       }
 
+      // Сохраняем данные для дальнейшей обработки
       this.pendingVkSuggestions.set(post.id, {
         status: "pending",
         text,
@@ -474,6 +573,7 @@ class VKBridge {
         authorInfo,
         post,
       })
+      this.handledSuggestIds.add(post.id)
     } catch (error) {
       logger.error("Error handling new VK suggest:", error)
       this.pendingVkSuggestions.delete(post.id)
@@ -492,32 +592,55 @@ class VKBridge {
         return
       }
 
-      // Публикуем на стену ВК
-      const photoBuffers = []
-      for (const url of suggestionData.photoUrls) {
-        try {
-          const buffer = await this.downloadFile(url)
-          photoBuffers.push({ buffer, filename: "photo.jpg" })
-        } catch (err) {
-          logger.error("Error downloading VK suggest photo:", err)
+      // ── Шаг 1: Опубликовать предложенный пост на стене ВК ──────────────
+      // Используем wall.post с post_id чтобы опубликовать существующий
+      // предложенный пост (без перезалива фото)
+      let vkPublished = false
+      try {
+        await this.vkApi("wall.post", {
+          owner_id: `-${this.vkGroupId}`,
+          post_id: postId,
+          from_group: 1,
+        })
+        // Помечаем опубликованный пост, чтобы polling не задублировал его в TG
+        this.processedVkPosts.add(String(postId))
+        setTimeout(() => this.processedVkPosts.delete(String(postId)), 10 * 60 * 1000)
+        vkPublished = true
+        logger.info(`VK suggest ${postId} published via wall.post(post_id)`)
+      } catch (publishErr) {
+        // Fallback: создаём новый пост с текстом и перезалитыми фото
+        logger.warn(`wall.post(post_id) failed (${publishErr.message}), falling back to re-upload...`)
+        const photoBuffers = []
+        for (const url of suggestionData.photoUrls) {
+          try {
+            const buffer = await this.downloadFile(url)
+            photoBuffers.push({ buffer, filename: "photo.jpg" })
+          } catch (err) {
+            logger.error("Error downloading VK suggest photo:", err)
+          }
+        }
+        const newPostId = await this.postToVk(suggestionData.text, photoBuffers)
+        if (newPostId) {
+          vkPublished = true
+          logger.info(`VK suggest ${postId} published as new post ${newPostId}`)
         }
       }
-      await this.postToVk(suggestionData.text, photoBuffers)
 
-      // Публикуем в TG каналы
+      // ── Шаг 2: Дублировать в TG каналы ────────────────────────────────
       await this.postToTelegram(
         suggestionData.text,
         suggestionData.photoUrls,
         `vk_suggest_approved_${postId}`
       )
 
-      // Обновляем кнопки
+      // ── Шаг 3: Обновить кнопки в чате с админом ───────────────────────
       try {
+        const label = vkPublished ? "✅ ПРИНЯТО (ТГ + ВК)" : "✅ ПРИНЯТО (только ТГ)"
         await this.bot.editMessageReplyMarkup(
-          { inline_keyboard: [[{ text: "✅ ПРИНЯТО (ТГ + ВК)", callback_data: "noop" }]] },
+          { inline_keyboard: [[{ text: label, callback_data: "noop" }]] },
           { chat_id: callbackQuery.message.chat.id, message_id: callbackQuery.message.message_id }
         )
-      } catch (e) {}
+      } catch (e) { /* ignore markup edit errors */ }
 
       await this.bot.answerCallbackQuery(callbackQuery.id, { text: "✅ Опубликовано в ТГ и ВК!" })
       this.pendingVkSuggestions.delete(postId)
@@ -533,11 +656,13 @@ class VKBridge {
   // ─────────────────────────────────────────────
   async rejectVkSuggest(postId, callbackQuery) {
     try {
+      // Удаляем предложенный пост из очереди ВК
       try {
         await this.vkApi("wall.delete", {
           owner_id: `-${this.vkGroupId}`,
           post_id: postId,
         })
+        logger.info(`VK suggest ${postId} deleted from wall`)
       } catch (err) {
         logger.warn(`Could not delete VK suggest post ${postId}: ${err.message}`)
       }
@@ -547,10 +672,11 @@ class VKBridge {
           { inline_keyboard: [[{ text: "❌ ОТКЛОНЕНО", callback_data: "noop" }]] },
           { chat_id: callbackQuery.message.chat.id, message_id: callbackQuery.message.message_id }
         )
-      } catch (e) {}
+      } catch (e) { /* ignore */ }
 
       await this.bot.answerCallbackQuery(callbackQuery.id, { text: "❌ Предложение отклонено" })
       this.pendingVkSuggestions.delete(postId)
+      this.handledSuggestIds.add(postId) // не показывать снова в polling
       logger.info(`VK suggest ${postId} rejected`)
     } catch (error) {
       logger.error("Error rejecting VK suggest:", error)
@@ -581,14 +707,17 @@ class VKBridge {
   }
 
   // ─────────────────────────────────────────────
-  // ЗАПУСК Long Poll
+  // ЗАПУСК: Long Poll + резервный polling
   // ─────────────────────────────────────────────
   async startPolling() {
     if (this.lpRunning) return
     this.lpRunning = true
 
+    // ── Long Poll ──────────────────────────────
     try {
       await this.getLongPollServer()
+      logger.info("VK Long Poll started successfully")
+      this._runLoop()
     } catch (error) {
       logger.error("VK Long Poll: failed to get server:", error)
       this.lpRunning = false
@@ -596,8 +725,25 @@ class VKBridge {
       return
     }
 
-    logger.info("VK Long Poll started successfully")
-    this._runLoop()
+    // ── Резервный polling: предложки ──────────
+    // Запуск сразу + каждые vkPollingInterval мс (по умолчанию 30 сек)
+    const suggestInterval = config.vkPollingInterval || 30000
+    await this.pollVkSuggests() // первый запрос сразу
+    this._suggestPollTimer = setInterval(() => {
+      this.pollVkSuggests().catch(e => logger.error("Suggest poll error:", e))
+    }, suggestInterval)
+
+    // ── Резервный polling: стена ──────────────
+    // Интервал в 2 раза реже, чтобы не перегружать API
+    const wallInterval = Math.max(suggestInterval * 2, 60000)
+    await this.pollVkWallPosts() // первый запрос (инициализация lastKnownWallPostId)
+    this._wallPollTimer = setInterval(() => {
+      this.pollVkWallPosts().catch(e => logger.error("Wall poll error:", e))
+    }, wallInterval)
+
+    logger.info(
+      `VK polling started: suggests every ${suggestInterval / 1000}s, wall every ${wallInterval / 1000}s`
+    )
   }
 
   async _runLoop() {
@@ -621,7 +767,9 @@ class VKBridge {
 
   stopPolling() {
     this.lpRunning = false
-    logger.info("VK Long Poll stopped")
+    if (this._suggestPollTimer) clearInterval(this._suggestPollTimer)
+    if (this._wallPollTimer) clearInterval(this._wallPollTimer)
+    logger.info("VK polling stopped")
   }
 }
 
