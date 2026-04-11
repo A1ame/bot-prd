@@ -331,9 +331,11 @@ class VKBridge {
 
   // ─────────────────────────────────────────────
   // РЕЗЕРВНЫЙ POLLING: новые посты на стене ВК → TG
-  // Срабатывает если Long Poll не доставил событие
+  // Срабатывает если Long Poll не доставил событие.
+  // Требует: группового токена с правом "wall".
   // ─────────────────────────────────────────────
   async pollVkWallPosts() {
+    if (this._wallPollDisabled) return
     try {
       const result = await this.vkApi("wall.get", {
         owner_id: `-${this.vkGroupId}`,
@@ -356,15 +358,11 @@ class VKBridge {
 
       // Найдены новые посты
       const newPosts = result.items.filter(p => p.id > this.lastKnownWallPostId)
-      // Публикуем в хронологическом порядке (старый → новый)
-      newPosts.reverse()
+      newPosts.reverse() // хронологический порядок
 
       for (const post of newPosts) {
         const dedupe = String(post.id)
-        if (this.processedVkPosts.has(dedupe)) {
-          logger.info(`VK wall poll: skipping already-processed post id=${post.id}`)
-          continue
-        }
+        if (this.processedVkPosts.has(dedupe)) continue
         logger.info(`VK wall poll: new post id=${post.id}`)
         const text = this.formatVkPostText(post)
         const photoUrls = this.extractVkPhotoUrls(post)
@@ -373,16 +371,27 @@ class VKBridge {
 
       this.lastKnownWallPostId = latestPost.id
     } catch (error) {
-      logger.error("Error in pollVkWallPosts:", error)
+      if (this._isError27(error)) {
+        this._wallPollDisabled = true
+        if (this._wallPollTimer) clearInterval(this._wallPollTimer)
+        logger.warn(
+          "VK wall poll DISABLED (error 27 — group token lacks 'wall' permission).\n" +
+          "  → Посты ВК→ТГ будут приходить только через Long Poll.\n" +
+          "  → Убедитесь, что в настройках группы ВК включено событие 'wall_post_new'.\n" +
+          "  → Или выдайте токену право 'wall': Управление группой → Работа с API → Токен доступа."
+        )
+      } else {
+        logger.error("Error in pollVkWallPosts:", error)
+      }
     }
   }
 
   // ─────────────────────────────────────────────
   // РЕЗЕРВНЫЙ POLLING: предложки из ВК → TG админу
-  // Основной источник, т.к. Long Poll нестабильно
-  // доставляет предложенные посты
+  // Требует: группового токена с правами "wall" + "manage".
   // ─────────────────────────────────────────────
   async pollVkSuggests() {
+    if (this._suggestPollDisabled) return
     try {
       const result = await this.vkApi("wall.get", {
         owner_id: `-${this.vkGroupId}`,
@@ -402,13 +411,24 @@ class VKBridge {
         }
       }
     } catch (error) {
-      // Ошибка 15 = нет прав на просмотр предложек — логируем один раз
-      if (error.message && error.message.includes("15")) {
-        logger.warn("VK suggest poll: Access denied (error 15). Check group token permissions (wall scope needed).")
+      if (this._isError27(error)) {
+        this._suggestPollDisabled = true
+        if (this._suggestPollTimer) clearInterval(this._suggestPollTimer)
+        logger.warn(
+          "VK suggest poll DISABLED (error 27).\n" +
+          "  НУЖНО: пересоздайте токен группы с правами Стена и Управление.\n" +
+          "  Управление группой - Работа с API - Токен доступа - создать новый.\n" +
+          "  До тех пор предложки будут приходить только через Long Poll (wall_post_new)."
+        )
       } else {
         logger.error("Error in pollVkSuggests:", error)
       }
     }
+  }
+
+  // Определяет ошибку "недостаточно прав для group token"
+  _isError27(error) {
+    return error && error.message && error.message.includes("[27]")
   }
 
   // ─────────────────────────────────────────────
@@ -713,6 +733,9 @@ class VKBridge {
     if (this.lpRunning) return
     this.lpRunning = true
 
+    // ── Диагностика: проверяем права токена ───
+    await this._checkTokenPermissions()
+
     // ── Long Poll ──────────────────────────────
     try {
       await this.getLongPollServer()
@@ -726,24 +749,74 @@ class VKBridge {
     }
 
     // ── Резервный polling: предложки ──────────
-    // Запуск сразу + каждые vkPollingInterval мс (по умолчанию 30 сек)
     const suggestInterval = config.vkPollingInterval || 30000
     await this.pollVkSuggests() // первый запрос сразу
-    this._suggestPollTimer = setInterval(() => {
-      this.pollVkSuggests().catch(e => logger.error("Suggest poll error:", e))
-    }, suggestInterval)
+    if (!this._suggestPollDisabled) {
+      this._suggestPollTimer = setInterval(() => {
+        this.pollVkSuggests().catch(e => logger.error("Suggest poll error:", e))
+      }, suggestInterval)
+    }
 
     // ── Резервный polling: стена ──────────────
-    // Интервал в 2 раза реже, чтобы не перегружать API
     const wallInterval = Math.max(suggestInterval * 2, 60000)
     await this.pollVkWallPosts() // первый запрос (инициализация lastKnownWallPostId)
-    this._wallPollTimer = setInterval(() => {
-      this.pollVkWallPosts().catch(e => logger.error("Wall poll error:", e))
-    }, wallInterval)
+    if (!this._wallPollDisabled) {
+      this._wallPollTimer = setInterval(() => {
+        this.pollVkWallPosts().catch(e => logger.error("Wall poll error:", e))
+      }, wallInterval)
+    }
 
     logger.info(
-      `VK polling started: suggests every ${suggestInterval / 1000}s, wall every ${wallInterval / 1000}s`
+      `VK Bridge ready. Long Poll: active. ` +
+      `Suggest poll: ${this._suggestPollDisabled ? "DISABLED (error 27)" : `every ${suggestInterval / 1000}s`}. ` +
+      `Wall poll: ${this._wallPollDisabled ? "DISABLED (error 27)" : `every ${wallInterval / 1000}s`}.`
     )
+  }
+
+  // ─────────────────────────────────────────────
+  // Проверка прав токена при запуске
+  // ─────────────────────────────────────────────
+  async _checkTokenPermissions() {
+    logger.info("VK: checking token permissions...")
+    try {
+      // groups.getById всегда работает с group token — проверяем базовую связь
+      await this.vkApi("groups.getById", { group_id: this.vkGroupId })
+      logger.info("VK: group token OK, basic access confirmed")
+    } catch (e) {
+      logger.error(`VK: token check failed: ${e.message}`)
+    }
+
+    // Проверяем доступ к стене
+    try {
+      await this.vkApi("wall.get", { owner_id: `-${this.vkGroupId}`, count: 1, filter: "owner" })
+      logger.info("VK: wall.get(owner) — OK (wall posts polling enabled)")
+    } catch (e) {
+      if (this._isError27(e)) {
+        logger.warn(
+          "VK: wall.get — НУЖНЫ ПРАВА 'Стена' на токене.\n" +
+          "  ⚠️  Без этого ВК→ТГ работает ТОЛЬКО через Long Poll.\n" +
+          "  РЕШЕНИЕ: Управление группой → Работа с API → Токен доступа\n" +
+          "           → пересоздайте токен и отметьте 'Стена (wall)'."
+        )
+      }
+    }
+
+    // Проверяем доступ к предложкам
+    try {
+      await this.vkApi("wall.get", { owner_id: `-${this.vkGroupId}`, count: 1, filter: "suggests" })
+      logger.info("VK: wall.get(suggests) — OK (suggest polling enabled)")
+    } catch (e) {
+      if (this._isError27(e)) {
+        logger.warn(
+          "VK: wall.get(suggests) — НУЖНЫ ПРАВА 'Стена' + 'Управление' на токене.\n" +
+          "  ⚠️  Без этого предложки из ВК работают ТОЛЬКО через Long Poll (wall_post_new).\n" +
+          "  РЕШЕНИЕ: Управление группой → Работа с API → Токен доступа\n" +
+          "           → пересоздайте токен и отметьте 'Стена (wall)' и 'Управление (manage)'.\n" +
+          "  ТАКЖЕ: убедитесь, что в настройках Long Poll включено событие 'Публикации на стене':\n" +
+          "           Управление группой → Работа с API → Long Poll API → включить 'Публикации'."
+        )
+      }
+    }
   }
 
   async _runLoop() {
