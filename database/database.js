@@ -330,10 +330,11 @@ class Database {
     })
   }
 
-  deleteChannel(chatId) {
+  deleteChannel(id) {
     return new Promise((resolve, reject) => {
-      const sql = `DELETE FROM channels WHERE chat_id = ?`
-      this.db.run(sql, [chatId], function(err) {
+      // id — числовой PRIMARY KEY из таблицы channels
+      const sql = `DELETE FROM channels WHERE id = ?`
+      this.db.run(sql, [id], function(err) {
         if (err) reject(err)
         else resolve(this.changes)
       })

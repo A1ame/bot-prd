@@ -118,8 +118,7 @@ class AdminBot {
                 await this.handleChannelMessage(msg)
             }
 
-            if (msg.chat.type === "private") {
-                // В личном чате adminChatId не используется — adminChatId это группа/супергруппа
+            if (msg.chat.type === "private" && !isAdminChat) {
                 await this.suggestionsManager.handlePrivateSuggestion(msg)
             }
         } catch (error) {
@@ -130,12 +129,13 @@ class AdminBot {
     async handleChannelPost(msg) {
         try {
             const chatId = msg.chat.id.toString()
+            logger.info(`TG channel_post received: chatId=${chatId}`)
 
             const channels = await db.getChannels()
-            logger.info(`TG channel post received: chatId=${chatId}, known channels: ${channels.map(c => c.chat_id).join(", ")}`)
+            logger.info(`Known channels in DB: ${channels.map(c => c.chat_id).join(", ")}`)
             const channel = channels.find((ch) => ch.chat_id === chatId)
             if (!channel) {
-                logger.warn(`TG channel post: channel ${chatId} not found in DB, skipping VK forward`)
+                logger.warn(`channel_post: chatId=${chatId} NOT in DB — check if channel was added via bot`)
                 return
             }
 
@@ -577,7 +577,6 @@ class AdminBot {
                 await this.bot.sendMessage(chatId, "📋 Каналы не добавлены. Сначала добавьте каналы.", keyboards.backToMain)
                 return
             }
-
             const botInfo = await this.bot.getMe()
             let message = "📝 *Предложения — ссылки для пользователей:*\n\n"
             channels.forEach((channel, index) => {
@@ -587,7 +586,6 @@ class AdminBot {
                 message += `   🔗 ${link}\n\n`
             })
             message += `Отправьте эти ссылки пользователям — через них они смогут предлагать посты.`
-
             await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown", ...keyboards.backToMain })
         } catch (error) {
             logger.error("Error showing suggestions:", error)
@@ -605,7 +603,6 @@ class AdminBot {
                 `• Выдаёт предупреждения\n` +
                 `• После ${config.maxWarnings} предупреждений — бан\n\n` +
                 `Для управления настройками конкретного канала:\nИспользуйте раздел *Каналы → Настройки канала*`
-
             await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown", ...keyboards.backToMain })
         } catch (error) {
             logger.error("Error showing moderation:", error)

@@ -286,8 +286,13 @@ class VKBridge {
   // ─────────────────────────────────────────────
   async handleTelegramChannelPost(msg) {
     try {
+      logger.info(`TG->VK: handleTelegramChannelPost called, chat_id=${msg.chat.id}, msg_id=${msg.message_id}`)
+
       const postKey = `tg_${msg.chat.id}_${msg.message_id}`
-      if (this.processedTgPosts.has(postKey)) return
+      if (this.processedTgPosts.has(postKey)) {
+        logger.info(`TG->VK: duplicate, skip postKey=${postKey}`)
+        return
+      }
       this.processedTgPosts.add(postKey)
       setTimeout(() => this.processedTgPosts.delete(postKey), 10 * 60 * 1000)
 
@@ -301,13 +306,15 @@ class VKBridge {
           const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
           const buffer = await this.downloadFile(fileUrl)
           photoBuffers.push({ buffer, filename: "photo.jpg" })
+          logger.info(`TG->VK: downloaded photo for msg_id=${msg.message_id}`)
         } catch (err) {
           logger.error("handleTelegramChannelPost: error downloading photo:", err)
         }
       }
 
-      logger.info(`TG->VK: posting from channel ${msg.chat.id}, msg_id=${msg.message_id}`)
-      await this.postToVk(text, photoBuffers, postKey)
+      logger.info(`TG->VK: calling postToVk, text_len=${text.length}, photos=${photoBuffers.length}`)
+      const result = await this.postToVk(text, photoBuffers, postKey)
+      logger.info(`TG->VK: postToVk result=${result}`)
     } catch (error) {
       logger.error("Error in handleTelegramChannelPost:", error)
     }
