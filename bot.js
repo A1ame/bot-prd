@@ -18,8 +18,8 @@ class AdminBot {
         // Инициализация VK Bridge
         if (config.vkToken && config.vkGroupId && config.vkGroupId !== "YOUR_VK_GROUP_ID_HERE") {
             this.vkBridge = new VKBridge(this.bot)
-            this.vkBridge.startPolling(config.vkPollingInterval || 30000)
-            logger.info("VK Bridge initialized and polling started")
+            this.vkBridge.startPolling()
+            logger.info("VK Bridge initialized and Long Poll started")
         } else {
             this.vkBridge = null
             logger.warn("VK Bridge disabled: VK_TOKEN or VK_GROUP_ID not set in .env")
