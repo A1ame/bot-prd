@@ -118,7 +118,8 @@ class AdminBot {
                 await this.handleChannelMessage(msg)
             }
 
-            if (msg.chat.type === "private" && !isAdminChat) {
+            if (msg.chat.type === "private") {
+                // В личном чате adminChatId не используется — adminChatId это группа/супергруппа
                 await this.suggestionsManager.handlePrivateSuggestion(msg)
             }
         } catch (error) {
@@ -131,8 +132,12 @@ class AdminBot {
             const chatId = msg.chat.id.toString()
 
             const channels = await db.getChannels()
+            logger.info(`TG channel post received: chatId=${chatId}, known channels: ${channels.map(c => c.chat_id).join(", ")}`)
             const channel = channels.find((ch) => ch.chat_id === chatId)
-            if (!channel) return
+            if (!channel) {
+                logger.warn(`TG channel post: channel ${chatId} not found in DB, skipping VK forward`)
+                return
+            }
 
             // ✅ Кросс-постинг: новый пост в TG канале → ВК
             if (this.vkBridge) {
@@ -562,6 +567,48 @@ class AdminBot {
             })
         } catch (error) {
             logger.error("Error showing stats:", error)
+        }
+    }
+
+    async showSuggestions(chatId) {
+        try {
+            const channels = await db.getChannels()
+            if (channels.length === 0) {
+                await this.bot.sendMessage(chatId, "📋 Каналы не добавлены. Сначала добавьте каналы.", keyboards.backToMain)
+                return
+            }
+
+            const botInfo = await this.bot.getMe()
+            let message = "📝 *Предложения — ссылки для пользователей:*\n\n"
+            channels.forEach((channel, index) => {
+                const cleanId = Math.abs(Number(channel.chat_id))
+                const link = `https://t.me/${botInfo.username}?start=${cleanId}_channel`
+                message += `${index + 1}. *${channel.title || channel.username}*\n`
+                message += `   🔗 ${link}\n\n`
+            })
+            message += `Отправьте эти ссылки пользователям — через них они смогут предлагать посты.`
+
+            await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown", ...keyboards.backToMain })
+        } catch (error) {
+            logger.error("Error showing suggestions:", error)
+        }
+    }
+
+    async showModeration(chatId) {
+        try {
+            const channels = await db.getChannels()
+            const message =
+                `🛡️ *Модерация*\n\n` +
+                `Каналов с модерацией: ${channels.filter(c => c.moderation_enabled).length} из ${channels.length}\n\n` +
+                `Модерация автоматически:\n` +
+                `• Удаляет сообщения с нарушениями\n` +
+                `• Выдаёт предупреждения\n` +
+                `• После ${config.maxWarnings} предупреждений — бан\n\n` +
+                `Для управления настройками конкретного канала:\nИспользуйте раздел *Каналы → Настройки канала*`
+
+            await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown", ...keyboards.backToMain })
+        } catch (error) {
+            logger.error("Error showing moderation:", error)
         }
     }
 
