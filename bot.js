@@ -156,24 +156,24 @@ class AdminBot {
 
             // ✅ Кросс-постинг: новый пост в TG канале → ВК
             if (this.vkBridge) {
-                // Не обрабатываем медиагруппы частично — ждём первый элемент
                 if (!msg.media_group_id) {
+                    // Одиночное сообщение
                     await this.vkBridge.handleTelegramChannelPost(msg)
                 } else {
-                    // Для медиагрупп берём только первое сообщение (с caption)
+                    // Медиагруппа — собираем ВСЕ сообщения, потом отправляем
                     if (!this._tgMediaGroupCache) this._tgMediaGroupCache = new Map()
 
                     if (!this._tgMediaGroupCache.has(msg.media_group_id)) {
-                        this._tgMediaGroupCache.set(msg.media_group_id, msg)
-
+                        this._tgMediaGroupCache.set(msg.media_group_id, [])
                         setTimeout(async () => {
-                            const firstMsg = this._tgMediaGroupCache.get(msg.media_group_id)
-                            if (firstMsg && this.vkBridge) {
-                                await this.vkBridge.handleTelegramChannelPost(firstMsg)
+                            const msgs = this._tgMediaGroupCache.get(msg.media_group_id)
+                            if (msgs && msgs.length > 0 && this.vkBridge) {
+                                await this.vkBridge.handleTelegramMediaGroup(msgs)
                             }
                             this._tgMediaGroupCache.delete(msg.media_group_id)
-                        }, 2000)
+                        }, 2500)
                     }
+                    this._tgMediaGroupCache.get(msg.media_group_id).push(msg)
                 }
             }
         } catch (error) {

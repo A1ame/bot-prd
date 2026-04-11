@@ -291,6 +291,60 @@ class VKBridge {
   }
 
   // ─────────────────────────────────────────────
+  // TG медиагруппа (альбом) → ВК
+  // ─────────────────────────────────────────────
+  async handleTelegramMediaGroup(msgs) {
+    try {
+      if (!msgs || msgs.length === 0) return
+
+      // Сортируем по message_id чтобы порядок был правильным
+      msgs.sort((a, b) => a.message_id - b.message_id)
+
+      const firstMsg = msgs[0]
+      const postKey = `tg_${firstMsg.chat.id}_group_${firstMsg.media_group_id}`
+
+      if (this.processedTgPosts.has(postKey)) {
+        logger.info(`TG->VK: media group duplicate, skip`)
+        return
+      }
+      this.processedTgPosts.add(postKey)
+      setTimeout(() => this.processedTgPosts.delete(postKey), 60 * 1000)
+
+      const text = firstMsg.caption || ""
+      const photoBuffers = []
+
+      logger.info(`TG->VK: processing media group of ${msgs.length} messages`)
+
+      for (const msg of msgs) {
+        let fileId = null
+        if (msg.photo) {
+          fileId = msg.photo[msg.photo.length - 1].file_id
+        } else if (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith("image/")) {
+          fileId = msg.document.file_id
+        }
+
+        if (fileId) {
+          try {
+            const fileInfo = await this.bot.getFile(fileId)
+            const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
+            const buffer = await this.downloadFile(fileUrl)
+            photoBuffers.push({ buffer, filename: "photo.jpg" })
+            logger.info(`TG->VK: downloaded photo ${photoBuffers.length}/${msgs.length}`)
+          } catch (err) {
+            logger.error(`TG->VK: error downloading photo from media group:`, err)
+          }
+        }
+      }
+
+      logger.info(`TG->VK: posting media group to VK, photos=${photoBuffers.length}, text_len=${text.length}`)
+      const result = await this.postToVk(text, photoBuffers, postKey)
+      logger.info(`TG->VK: media group postToVk result=${result}`)
+    } catch (error) {
+      logger.error("Error in handleTelegramMediaGroup:", error)
+    }
+  }
+
+  // ─────────────────────────────────────────────
   // TG канал → новый пост → в ВК
   // ─────────────────────────────────────────────
   async handleTelegramChannelPost(msg) {
