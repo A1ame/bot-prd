@@ -288,6 +288,9 @@ class VKBridge {
   async handleTelegramChannelPost(msg) {
     try {
       logger.info(`TG->VK: handleTelegramChannelPost called, chat_id=${msg.chat.id}, msg_id=${msg.message_id}`)
+      logger.info(`TG->VK: msg fields: ${Object.keys(msg).join(",")}`)
+      logger.info(`TG->VK: has_photo=${!!msg.photo}, has_document=${!!msg.document}, media_group=${msg.media_group_id || "none"}`)
+      if (msg.photo) logger.info(`TG->VK: photo sizes count=${msg.photo.length}, largest file_id=${msg.photo[msg.photo.length-1].file_id}`)
       const postKey = `tg_${msg.chat.id}_${msg.message_id}`
       if (this.processedTgPosts.has(postKey)) {
         logger.info(`TG->VK: duplicate, skip`)
