@@ -25,7 +25,6 @@ class AdminBot {
             }
         })
         this.channelManager = new ChannelManager(this.bot)
-        this.suggestionsManager = new SuggestionsManager(this.bot)
         this.schedulerManager = null
         this.floodTracker = new Map()
 
@@ -38,6 +37,9 @@ class AdminBot {
             this.vkBridge = null
             logger.warn("VK Bridge disabled: VK_TOKEN or VK_GROUP_ID not set in .env")
         }
+
+        // SuggestionsManager получает vkBridge для публикации одобренных предложений в ВК
+        this.suggestionsManager = new SuggestionsManager(this.bot, this.vkBridge)
 
         this.setupHandlers()
         logger.info("Admin bot started successfully")
@@ -146,10 +148,9 @@ class AdminBot {
             logger.info(`TG channel_post received: chatId=${chatId}`)
 
             const channels = await db.getChannels()
-            logger.info(`Known channels in DB: ${channels.map(c => c.chat_id).join(", ")}`)
             const channel = channels.find((ch) => ch.chat_id === chatId)
             if (!channel) {
-                logger.warn(`channel_post: chatId=${chatId} NOT in DB — add channel via bot first`)
+                logger.warn(`channel_post: chatId=${chatId} NOT in DB`)
                 return
             }
 

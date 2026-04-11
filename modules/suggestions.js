@@ -4,8 +4,9 @@ const logger = require("../utils/logger")
 const config = require("../config/config")
 
 class SuggestionsManager {
-    constructor(bot) {
+    constructor(bot, vkBridge = null) {
         this.bot = bot
+        this.vkBridge = vkBridge
         this.userStates = new Map()
         this.mediaGroupCache = new Map()
         this.cancelMessages = new Map()
@@ -541,6 +542,50 @@ class SuggestionsManager {
         }
     }
 
+    // Отправить одобренное предложение в ВК
+    async _postSuggestionToVk(suggestion, extraText = "") {
+        if (!this.vkBridge) return
+        try {
+            const text = (suggestion.caption || "") + (extraText ? "\n\n" + extraText : "")
+            const photoBuffers = []
+
+            if (suggestion.content_type === "album" && suggestion.file_ids) {
+                for (const fileId of suggestion.file_ids) {
+                    try {
+                        const fileInfo = await this.bot.getFile(fileId)
+                        const fileUrl = `https://api.telegram.org/file/bot${require("../config/config").botToken}/${fileInfo.file_path}`
+                        const buffer = await this.vkBridge.downloadFile(fileUrl)
+                        photoBuffers.push({ buffer, filename: "photo.jpg" })
+                    } catch (e) {
+                        logger.error("_postSuggestionToVk: error downloading album photo:", e)
+                    }
+                }
+            } else if (suggestion.content_type === "photo" && suggestion.original_message_id && suggestion.original_chat_id) {
+                try {
+                    // Получаем file_id из оригинального сообщения через forwardMessage trick
+                    const fwd = await this.bot.forwardMessage(require("../config/config").adminChatId, suggestion.original_chat_id, suggestion.original_message_id)
+                    if (fwd.photo) {
+                        const photo = fwd.photo[fwd.photo.length - 1]
+                        const fileInfo = await this.bot.getFile(photo.file_id)
+                        const fileUrl = `https://api.telegram.org/file/bot${require("../config/config").botToken}/${fileInfo.file_path}`
+                        const buffer = await this.vkBridge.downloadFile(fileUrl)
+                        photoBuffers.push({ buffer, filename: "photo.jpg" })
+                        // Удаляем пересланное сообщение
+                        try { await this.bot.deleteMessage(require("../config/config").adminChatId, fwd.message_id) } catch(e) {}
+                    }
+                } catch (e) {
+                    logger.error("_postSuggestionToVk: error forwarding photo:", e)
+                }
+            }
+
+            const dedupeKey = `suggest_approved_${suggestion.id}`
+            await this.vkBridge.postToVk(text, photoBuffers, dedupeKey)
+            logger.info(`Suggestion #${suggestion.id} posted to VK`)
+        } catch (error) {
+            logger.error("_postSuggestionToVk error:", error)
+        }
+    }
+
     async approveSuggestionWithGuide(suggestion, channel, callbackQuery) {
         try {
             const cleanChannelId = channel.chat_id.startsWith('-') ? channel.chat_id.slice(1) : channel.chat_id;
@@ -583,6 +628,8 @@ class SuggestionsManager {
                 await this.bot.sendMessage(suggestion.user_id, "✅ Ваше предложение было одобрено и опубликовано!");
             }
 
+            // Публикуем в ВК
+            await this._postSuggestionToVk(suggestion)
             await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Предложение одобрено с гайдом!" });
         } catch (error) {
             console.error("Error approving suggestion with guide:", error);
@@ -625,6 +672,8 @@ class SuggestionsManager {
                 await this.bot.sendMessage(suggestion.user_id, "✅ Ваше предложение было одобрено и опубликовано!");
             }
 
+            // Публикуем в ВК
+            await this._postSuggestionToVk(suggestion)
             await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Предложение одобрено!" });
         } catch (error) {
             logger.error("Error approving suggestion:", error);

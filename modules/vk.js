@@ -191,7 +191,7 @@ class VKBridge {
   // ─────────────────────────────────────────────
   async postToVk(text, photoBuffers = [], dedupeKey = null) {
     try {
-      // Note: tg_ keys are managed by handleTelegramChannelPost, skip dedup check for them
+      // tg_ ключи управляются в handleTelegramChannelPost — не блокируем их здесь
       if (dedupeKey && !dedupeKey.startsWith('tg_') && this.processedTgPosts.has(dedupeKey)) {
         logger.info(`postToVk: already processed ${dedupeKey}, skip`)
         return null
@@ -299,20 +299,29 @@ class VKBridge {
       const text = msg.text || msg.caption || ""
       const photoBuffers = []
 
+      // Собираем фото: сжатое фото или документ-изображение
+      const photoFileIds = []
       if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1]
+        photoFileIds.push(msg.photo[msg.photo.length - 1].file_id)
+      } else if (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith("image/")) {
+        photoFileIds.push(msg.document.file_id)
+      }
+
+      for (const fileId of photoFileIds) {
         try {
-          const fileInfo = await this.bot.getFile(photo.file_id)
+          const fileInfo = await this.bot.getFile(fileId)
           const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
           const buffer = await this.downloadFile(fileUrl)
           photoBuffers.push({ buffer, filename: "photo.jpg" })
+          logger.info(`TG->VK: downloaded photo file_id=${fileId}`)
         } catch (err) {
           logger.error("handleTelegramChannelPost: error downloading photo:", err)
         }
       }
 
-      logger.info(`TG->VK: posting from channel ${msg.chat.id}, msg_id=${msg.message_id}`)
-      await this.postToVk(text, photoBuffers, postKey)
+      logger.info(`TG->VK: calling postToVk, text_len=${text.length}, photos=${photoBuffers.length}`)
+      const result = await this.postToVk(text, photoBuffers, postKey)
+      logger.info(`TG->VK: postToVk result=${result}`)
     } catch (error) {
       logger.error("Error in handleTelegramChannelPost:", error)
     }
