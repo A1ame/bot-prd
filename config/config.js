@@ -13,4 +13,11 @@ module.exports = {
   autoModeration: "true",
   rulesMessageDelay: Number.parseInt(process.env.RULES_MESSAGE_DELAY) || 5000,
   maxWarnings: Number.parseInt(process.env.MAX_WARNINGS) || 3,
+
+  // ВКонтакте настройки
+  vkToken: process.env.VK_TOKEN,
+  vkGroupId: process.env.VK_GROUP_ID,          // ID группы БЕЗ минуса (например: 123456789)
+  vkConfirmationCode: process.env.VK_CONFIRMATION_CODE, // Код подтверждения Callback API (опционально)
+  vkSecretKey: process.env.VK_SECRET_KEY,       // Секретный ключ Callback API (опционально)
+  vkPollingInterval: Number.parseInt(process.env.VK_POLLING_INTERVAL) || 30000, // Интервал polling в мс
 }
