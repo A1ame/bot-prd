@@ -9,7 +9,21 @@ const VKBridge = require("./modules/vk")
 
 class AdminBot {
     constructor() {
-        this.bot = new TelegramBot(config.botToken, { polling: true })
+        this.bot = new TelegramBot(config.botToken, {
+            polling: {
+                params: {
+                    allowed_updates: [
+                        "message",
+                        "edited_message",
+                        "channel_post",
+                        "edited_channel_post",
+                        "callback_query",
+                        "chat_member",
+                        "my_chat_member"
+                    ]
+                }
+            }
+        })
         this.channelManager = new ChannelManager(this.bot)
         this.suggestionsManager = new SuggestionsManager(this.bot)
         this.schedulerManager = null
@@ -118,7 +132,7 @@ class AdminBot {
                 await this.handleChannelMessage(msg)
             }
 
-            if (msg.chat.type === "private" && !isAdminChat) {
+            if (msg.chat.type === "private") {
                 await this.suggestionsManager.handlePrivateSuggestion(msg)
             }
         } catch (error) {
@@ -135,7 +149,7 @@ class AdminBot {
             logger.info(`Known channels in DB: ${channels.map(c => c.chat_id).join(", ")}`)
             const channel = channels.find((ch) => ch.chat_id === chatId)
             if (!channel) {
-                logger.warn(`channel_post: chatId=${chatId} NOT in DB — check if channel was added via bot`)
+                logger.warn(`channel_post: chatId=${chatId} NOT in DB — add channel via bot first`)
                 return
             }
 
@@ -598,11 +612,11 @@ class AdminBot {
             const message =
                 `🛡️ *Модерация*\n\n` +
                 `Каналов с модерацией: ${channels.filter(c => c.moderation_enabled).length} из ${channels.length}\n\n` +
-                `Модерация автоматически:\n` +
+                `Автоматически:\n` +
                 `• Удаляет сообщения с нарушениями\n` +
                 `• Выдаёт предупреждения\n` +
                 `• После ${config.maxWarnings} предупреждений — бан\n\n` +
-                `Для управления настройками конкретного канала:\nИспользуйте раздел *Каналы → Настройки канала*`
+                `Для настройки: *Каналы → Настройки канала*`
             await this.bot.sendMessage(chatId, message, { parse_mode: "Markdown", ...keyboards.backToMain })
         } catch (error) {
             logger.error("Error showing moderation:", error)
