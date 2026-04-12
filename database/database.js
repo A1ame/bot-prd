@@ -81,6 +81,7 @@ class Database {
       `CREATE TABLE IF NOT EXISTS banned_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER UNIQUE NOT NULL,
+        username TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
     ]
@@ -336,19 +337,25 @@ class Database {
     })
   }
 
-  banUser(userId) {
+  banUser(userId, username = null) {
     return new Promise((resolve, reject) => {
-      const sql = `INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)`
-      this.db.run(sql, [userId], function(err) {
+      const sql = `INSERT OR REPLACE INTO banned_users (user_id, username) VALUES (?, ?)`
+      this.db.run(sql, [userId, username || null], function(err) {
         if (err) reject(err)
         else resolve(this.changes)
       })
     })
   }
 
-  unbanUser(userId) {
+  unbanUser(userIdOrUsername) {
     return new Promise((resolve, reject) => {
-      this.db.run(`DELETE FROM banned_users WHERE user_id = ?`, [userId], function(err) {
+      // Поддерживаем и числовой ID и @username
+      const isId = !isNaN(parseInt(userIdOrUsername)) && !String(userIdOrUsername).startsWith("@")
+      const sql = isId
+        ? `DELETE FROM banned_users WHERE user_id = ?`
+        : `DELETE FROM banned_users WHERE username = ?`
+      const param = isId ? parseInt(userIdOrUsername) : String(userIdOrUsername).replace("@", "").toLowerCase()
+      this.db.run(sql, [param], function(err) {
         if (err) reject(err)
         else resolve(this.changes)
       })
@@ -360,6 +367,15 @@ class Database {
       this.db.get(`SELECT 1 FROM banned_users WHERE user_id = ?`, [userId], (err, row) => {
         if (err) reject(err)
         else resolve(!!row)
+      })
+    })
+  }
+
+  getBannedUsers() {
+    return new Promise((resolve, reject) => {
+      this.db.all(`SELECT * FROM banned_users ORDER BY created_at DESC`, (err, rows) => {
+        if (err) reject(err)
+        else resolve(rows)
       })
     })
   }

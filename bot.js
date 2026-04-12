@@ -100,28 +100,22 @@ class AdminBot {
                 // Обработка ввода ID для разбана
                 if (this.unbanStates.get(userId) === "waiting_unban_id" && msg.text) {
                     const input = msg.text.trim()
-                    let targetId = null
-                    if (input.startsWith("@")) {
-                        targetId = await this._resolveUsername(input)
-                        if (!targetId) {
-                            await this.bot.sendMessage(chatId,
-                                `❌ Не удалось найти пользователя ${input}\n\n` +
-                                `Попробуйте указать числовой ID пользователя вместо @username.\n` +
-                                `ID можно узнать через @userinfobot`
-                            )
-                            this.unbanStates.delete(userId)
-                            return
+                    // unbanUser поддерживает и числовой ID и @username (ищет в БД)
+                    const changes = await db.unbanUser(input)
+                    if (changes > 0) {
+                        await this.bot.sendMessage(chatId, `✅ Пользователь ${input} разбанен — теперь может писать боту.`)
+                        // Пробуем уведомить пользователя если знаем его ID
+                        if (!input.startsWith("@")) {
+                            const targetId = parseInt(input)
+                            if (!isNaN(targetId)) {
+                                try { await this.bot.sendMessage(targetId, "✅ Вы разблокированы и снова можете отправлять предложения.") } catch (e) {}
+                            }
                         }
                     } else {
-                        targetId = parseInt(input)
-                    }
-
-                    if (targetId && !isNaN(targetId)) {
-                        await db.unbanUser(targetId)
-                        await this.bot.sendMessage(chatId, `✅ Пользователь ${input} (ID: ${targetId}) разбанен — теперь может писать боту.`)
-                        try { await this.bot.sendMessage(targetId, "✅ Вы разблокированы и снова можете отправлять предложения.") } catch (e) {}
-                    } else {
-                        await this.bot.sendMessage(chatId, `❌ Неверный формат. Введите числовой ID или @username.`)
+                        await this.bot.sendMessage(chatId,
+                            `❌ Пользователь ${input} не найден в списке забаненных.\n\n` +
+                            `Проверьте правильность ID или @username.`
+                        )
                     }
                     this.unbanStates.delete(userId)
                     return

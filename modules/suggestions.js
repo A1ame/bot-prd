@@ -715,7 +715,8 @@ class SuggestionsManager {
     async banSuggestionAuthor(suggestion, channel, callbackQuery) {
         try {
             // Баним пользователя в боте (через БД) — он больше не сможет писать боту
-            await db.banUser(suggestion.user_id);
+            const usernameToSave = suggestion.username ? suggestion.username.replace("@", "").toLowerCase() : null
+            await db.banUser(suggestion.user_id, usernameToSave);
             await db.updateSuggestionStatus(suggestion.id, "banned");
 
             await this.bot.editMessageReplyMarkup(

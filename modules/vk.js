@@ -614,15 +614,8 @@ class VKBridge {
         logger.info(`VK suggest ${postId}: published, new_post_id=${newVkPostId}`)
       } catch (publishErr) {
         logger.warn(`wall.post(post_id=${postId}) failed: ${publishErr.message} — fallback to re-upload`)
-        const photoBuffers = []
-        for (const url of suggestionData.photoUrls) {
-          try {
-            const buffer = await this.downloadFile(url)
-            photoBuffers.push({ buffer, filename: "photo.jpg" })
-          } catch (err) {
-            logger.error("Error downloading photo for re-upload:", err)
-          }
-        }
+        // Используем уже скачанные буферы (то же качество что показано в предложке)
+        const photoBuffers = (suggestionData.photoBuffers || []).map(buf => ({ buffer: buf, filename: "photo.jpg" }))
         newVkPostId = await this.postToVk(finalTextVk, photoBuffers)
         if (newVkPostId) vkPublished = true
       }
