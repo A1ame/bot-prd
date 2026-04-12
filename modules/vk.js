@@ -161,6 +161,62 @@ class VKBridge {
     }
   }
 
+  // ─────────────────────────────────────────────
+  // Загрузить видео на стену ВК
+  // ─────────────────────────────────────────────
+  async uploadVideoToVk(fileBuffer, filename = "video.mp4") {
+    try {
+      // Шаг 1: получить сервер загрузки
+      const uploadServer = await this.vkApi("video.save", {
+        group_id: this.vkGroupId,
+        name: filename,
+        wallpost: 0,
+        no_comments: 0,
+      })
+      // uploadServer.upload_url — куда загружать
+      const uploaded = await this.multipartUploadVideo(uploadServer.upload_url, fileBuffer, filename)
+      logger.info(`VK video uploaded: owner_id=${uploadServer.owner_id}, video_id=${uploadServer.video_id}`)
+      return `video${uploadServer.owner_id}_${uploadServer.video_id}`
+    } catch (error) {
+      logger.error("Error uploading video to VK:", error)
+      return null
+    }
+  }
+
+  async multipartUploadVideo(uploadUrl, fileBuffer, filename) {
+    return new Promise((resolve, reject) => {
+      const boundary = `----FormBoundary${Date.now()}`
+      const header = Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="video_file"; filename="${filename}"\r\nContent-Type: video/mp4\r\n\r\n`
+      )
+      const footer = Buffer.from(`\r\n--${boundary}--\r\n`)
+      const body = Buffer.concat([header, fileBuffer, footer])
+
+      const url = new URL(uploadUrl)
+      const options = {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+      }
+
+      const protocol = url.protocol === "https:" ? https : http
+      const req = protocol.request(options, (res) => {
+        let data = ""
+        res.on("data", (chunk) => (data += chunk))
+        res.on("end", () => {
+          try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+        })
+      })
+      req.on("error", reject)
+      req.write(body)
+      req.end()
+    })
+  }
+
   async multipartUpload(uploadUrl, fileBuffer, filename) {
     return new Promise((resolve, reject) => {
       const boundary = `----FormBoundary${Date.now()}`
@@ -207,9 +263,14 @@ class VKBridge {
       }
 
       const attachments = []
-      for (const { buffer, filename } of photoBuffers) {
-        const att = await this.uploadPhotoToVk(buffer, filename)
-        if (att) attachments.push(att)
+      for (const { buffer, filename, type } of photoBuffers) {
+        if (type === "video" || (filename && filename.match(/\.(mp4|avi|mov|mkv|webm)$/i))) {
+          const att = await this.uploadVideoToVk(buffer, filename || "video.mp4")
+          if (att) attachments.push(att)
+        } else {
+          const att = await this.uploadPhotoToVk(buffer, filename || "photo.jpg")
+          if (att) attachments.push(att)
+        }
       }
 
       const params = {
@@ -243,7 +304,7 @@ class VKBridge {
   // ─────────────────────────────────────────────
   // ПУБЛИКАЦИЯ В TELEGRAM (из VK)
   // ─────────────────────────────────────────────
-  async postToTelegram(text, photoUrls = [], dedupeKey = null) {
+  async postToTelegram(text, photoUrls = [], dedupeKey = null, videoData = []) {
     try {
       const db = require("../database/database")
       const channels = await db.getChannels()
@@ -261,14 +322,28 @@ class VKBridge {
 
       for (const channel of channels) {
         try {
-          if (photoUrls.length === 0) {
+          if (photoUrls.length === 0 && (!videoData || videoData.length === 0)) {
             await this.bot.sendMessage(channel.chat_id, text || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
+          } else if (videoData && videoData.length > 0) {
+            // Видео из ВК — ссылки (прямой URL VK не отдаёт)
+            const parts = []
+            if (text) parts.push(text)
+            parts.push("\ud83c\udfa5 Видео из ВКонтакте:")
+            videoData.forEach((v, i) => {
+              parts.push((i + 1) + ". " + (v.title ? v.title + " — " : "") + v.videoUrl)
+            })
+            await this.bot.sendMessage(channel.chat_id, parts.join("\n"), { disable_web_page_preview: false })
+            if (photoUrls.length === 1) {
+              await this.bot.sendPhoto(channel.chat_id, photoUrls[0])
+            } else if (photoUrls.length > 1) {
+              const media = photoUrls.slice(0, 10).map(url => ({ type: "photo", media: url }))
+              await this.bot.sendMediaGroup(channel.chat_id, media)
+            }
           } else if (photoUrls.length === 1) {
             await this.bot.sendPhoto(channel.chat_id, photoUrls[0], { caption: text || "", parse_mode: "HTML" })
           } else {
             const media = photoUrls.slice(0, 10).map((url, idx) => ({
-              type: "photo",
-              media: url,
+              type: "photo", media: url,
               caption: idx === 0 ? (text || "") : undefined,
               parse_mode: "HTML",
             }))
@@ -318,10 +393,19 @@ class VKBridge {
 
       for (const msg of msgs) {
         let fileId = null
+        let fileType = "photo"
+        let fileName = "photo.jpg"
+
         if (msg.photo) {
           fileId = msg.photo[msg.photo.length - 1].file_id
-        } else if (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith("image/")) {
-          fileId = msg.document.file_id
+        } else if (msg.video) {
+          fileId = msg.video.file_id; fileType = "video"; fileName = "video.mp4"
+        } else if (msg.animation) {
+          fileId = msg.animation.file_id; fileType = "video"; fileName = "animation.mp4"
+        } else if (msg.document) {
+          const mime = msg.document.mime_type || ""
+          if (mime.startsWith("image/")) { fileId = msg.document.file_id }
+          else if (mime.startsWith("video/")) { fileId = msg.document.file_id; fileType = "video"; fileName = "video.mp4" }
         }
 
         if (fileId) {
@@ -329,10 +413,10 @@ class VKBridge {
             const fileInfo = await this.bot.getFile(fileId)
             const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
             const buffer = await this.downloadFile(fileUrl)
-            photoBuffers.push({ buffer, filename: "photo.jpg" })
-            logger.info(`TG->VK: downloaded photo ${photoBuffers.length}/${msgs.length}`)
+            photoBuffers.push({ buffer, filename: fileName, type: fileType })
+            logger.info(`TG->VK: downloaded ${fileType} ${photoBuffers.length}/${msgs.length}`)
           } catch (err) {
-            logger.error(`TG->VK: error downloading photo from media group:`, err)
+            logger.error(`TG->VK: error downloading ${fileType} from media group:`, err)
           }
         }
       }
@@ -365,23 +449,32 @@ class VKBridge {
       const text = msg.text || msg.caption || ""
       const photoBuffers = []
 
-      // Собираем фото: сжатое фото или документ-изображение
-      const photoFileIds = []
+      // Собираем медиа: фото, видео, документ-изображение
+      const mediaItems = []  // { fileId, type, filename }
       if (msg.photo) {
-        photoFileIds.push(msg.photo[msg.photo.length - 1].file_id)
-      } else if (msg.document && msg.document.mime_type && msg.document.mime_type.startsWith("image/")) {
-        photoFileIds.push(msg.document.file_id)
+        mediaItems.push({ fileId: msg.photo[msg.photo.length - 1].file_id, type: "photo", filename: "photo.jpg" })
+      } else if (msg.video) {
+        mediaItems.push({ fileId: msg.video.file_id, type: "video", filename: "video.mp4" })
+      } else if (msg.animation) {
+        mediaItems.push({ fileId: msg.animation.file_id, type: "video", filename: "animation.mp4" })
+      } else if (msg.document) {
+        const mime = msg.document.mime_type || ""
+        if (mime.startsWith("image/")) {
+          mediaItems.push({ fileId: msg.document.file_id, type: "photo", filename: "photo.jpg" })
+        } else if (mime.startsWith("video/")) {
+          mediaItems.push({ fileId: msg.document.file_id, type: "video", filename: "video.mp4" })
+        }
       }
 
-      for (const fileId of photoFileIds) {
+      for (const item of mediaItems) {
         try {
-          const fileInfo = await this.bot.getFile(fileId)
+          const fileInfo = await this.bot.getFile(item.fileId)
           const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
           const buffer = await this.downloadFile(fileUrl)
-          photoBuffers.push({ buffer, filename: "photo.jpg" })
-          logger.info(`TG->VK: downloaded photo file_id=${fileId}`)
+          photoBuffers.push({ buffer, filename: item.filename, type: item.type })
+          logger.info(`TG->VK: downloaded ${item.type} file_id=${item.fileId}, size=${buffer.length}`)
         } catch (err) {
-          logger.error("handleTelegramChannelPost: error downloading photo:", err)
+          logger.error(`handleTelegramChannelPost: error downloading ${item.type}:`, err)
         }
       }
 
@@ -471,7 +564,9 @@ class VKBridge {
         logger.info(`VK: new wall post id=${post.id}, forwarding to TG...`)
         const text = this.formatVkPostText(post)
         const photoUrls = await this.getFullPhotoUrls(post)
-        await this.postToTelegram(text, photoUrls, String(post.id))
+        const videoData = this.extractVkVideoData(post)
+        logger.info(`VK->TG: post ${post.id} has ${photoUrls.length} photos, ${videoData.length} videos`)
+        await this.postToTelegram(text, photoUrls, String(post.id), videoData)
       }
     } catch (error) {
       logger.error("Error handling VK update:", error)
@@ -498,8 +593,8 @@ class VKBridge {
       }
 
       const text = this.formatVkPostText(post)
-      // Используем photos.getById для получения оригинального размера фото
       const photoUrls = await this.getFullPhotoUrls(post)
+      const videoData = this.extractVkVideoData(post)
 
       // Скачиваем фото сразу в полном качестве
       const photoBuffers = []
@@ -513,7 +608,17 @@ class VKBridge {
         }
       }
 
-      let authorInfo = "Неизвестный пользователь"
+      // Добавляем ссылки на видео в текст для отображения в админ-чате
+      let adminText = text || ""
+      if (videoData.length > 0) {
+        const vparts = ["\n\n\ud83c\udfa5 Видео:"]
+        videoData.forEach((v, i) => {
+          vparts.push((i + 1) + ". " + (v.title ? v.title + " \u2014 " : "") + v.videoUrl)
+        })
+        adminText += vparts.join("\n")
+      }
+
+            let authorInfo = "Неизвестный пользователь"
       if (post.from_id && post.from_id > 0) {
         try {
           const users = await this.vkApi("users.get", { user_ids: post.from_id, fields: "screen_name" })
@@ -530,7 +635,7 @@ class VKBridge {
         `📬 *Новое предложение из ВКонтакте*\n\n` +
         `👤 Автор: ${authorInfo}\n` +
         `🆔 ID поста в ВК: ${post.id}\n\n` +
-        (text ? `📝 Текст:\n${text}\n\n` : `📝 Текст: отсутствует\n\n`) +
+        (adminText ? `📝 Текст:\n${adminText}\n\n` : `📝 Текст: отсутствует\n\n`) +
         `Примите или отклоните публикацию:`
 
       const keyboard = {
@@ -567,7 +672,7 @@ class VKBridge {
       }
 
       // Сохраняем буферы вместо URL
-      this.pendingVkSuggestions.set(post.id, { status: "pending", text, photoUrls, photoBuffers, authorInfo, post })
+      this.pendingVkSuggestions.set(post.id, { status: "pending", text, photoUrls, photoBuffers, videoData, authorInfo, post })
       this.handledSuggestIds.add(post.id)
       logger.info(`VK suggest ${post.id} sent to admin chat`)
     } catch (error) {
@@ -592,8 +697,18 @@ class VKBridge {
       const suggestLink = `https://t.me/${config.botName}?start=${cleanChannelId}_channel`
       const guideTgText = withGuide ? `\n\n📒 Хочешь чтобы твоё сообщение попало в канал — пиши <a href="${suggestLink}">сюда</a>` : ""
       const guideVkText = withGuide ? `\n\nЕсли ты хочешь, чтобы новость попала в Подслушку, пролистай вверх и нажми на кнопку "Предложить новость"` : ""
-      const finalTextTg = (suggestionData.text || "") + guideTgText
-      const finalTextVk = (suggestionData.text || "") + guideVkText
+      // Добавляем ссылки на видео в текст
+      const videoData = suggestionData.videoData || []
+      let baseText = suggestionData.text || ""
+      let videoLinksText = ""
+      if (videoData.length > 0) {
+        videoLinksText = "\n\n🎬 Видео:\n"
+        videoData.forEach((v, i) => {
+          videoLinksText += `${i + 1}. ${v.title ? v.title + " — " : ""}${v.videoUrl}\n`
+        })
+      }
+      const finalTextTg = baseText + videoLinksText + guideTgText
+      const finalTextVk = baseText + videoLinksText + guideVkText
 
       const db = require("../database/database")
       const channels = await db.getChannels()
@@ -818,6 +933,24 @@ class VKBridge {
     let text = post.text || ""
     if (text.length > 1000) text = text.substring(0, 997) + "..."
     return text
+  }
+
+  extractVkVideoData(post) {
+    // Возвращает список { type, url/attachment } для видео из поста
+    const videos = []
+    if (!post.attachments) return videos
+    for (const att of post.attachments) {
+      if (att.type === "video" && att.video) {
+        // VK не отдаёт прямой URL видео через Long Poll — используем attachment строку
+        // для встраивания через sendVideo с URL страницы
+        const v = att.video
+        // Берём URL превью (thumbnail) для отправки как видео-превью
+        const thumbUrl = v.image ? v.image[v.image.length - 1]?.url : null
+        const videoUrl = `https://vk.com/video${v.owner_id}_${v.id}`
+        videos.push({ ownerId: v.owner_id, videoId: v.id, thumbUrl, videoUrl, title: v.title || "" })
+      }
+    }
+    return videos
   }
 
   extractVkPhotoUrls(post) {
