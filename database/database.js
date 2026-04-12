@@ -99,7 +99,8 @@ class Database {
       `ALTER TABLE suggestions ADD COLUMN caption TEXT`,
       `ALTER TABLE scheduled_messages ADD COLUMN media_group_id TEXT`,
       `ALTER TABLE scheduled_messages ADD COLUMN all_message_ids TEXT`,
-      `ALTER TABLE scheduled_messages ADD COLUMN media_files TEXT`
+      `ALTER TABLE scheduled_messages ADD COLUMN media_files TEXT`,
+      `ALTER TABLE banned_users ADD COLUMN username TEXT`
     ]
 
     alterQueries.forEach((sql) => {

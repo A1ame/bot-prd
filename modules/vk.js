@@ -612,6 +612,20 @@ class VKBridge {
         setTimeout(() => this.processedVkPosts.delete(String(newVkPostId || postId)), 10 * 60 * 1000)
         vkPublished = true
         logger.info(`VK suggest ${postId}: published, new_post_id=${newVkPostId}`)
+
+        // Если нужен гайд — редактируем опубликованный пост
+        if (withGuide && newVkPostId && finalTextVk) {
+          try {
+            await this.vkApi("wall.edit", {
+              owner_id: `-${this.vkGroupId}`,
+              post_id: newVkPostId,
+              message: finalTextVk,
+            })
+            logger.info(`VK suggest ${postId}: guide text added via wall.edit`)
+          } catch (editErr) {
+            logger.warn(`wall.edit failed: ${editErr.message}`)
+          }
+        }
       } catch (publishErr) {
         logger.warn(`wall.post(post_id=${postId}) failed: ${publishErr.message} — fallback to re-upload`)
         // Используем уже скачанные буферы (то же качество что показано в предложке)
@@ -819,7 +833,7 @@ class VKBridge {
       const photos = await this.vkApi("photos.getById", {
         photos: photoIds.join(","),
         photo_sizes: 1,
-      })
+      }, true)  // user token required
       const urls = []
       for (const photo of photos) {
         const sizes = photo.sizes || []
