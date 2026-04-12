@@ -486,36 +486,50 @@ class AdminBot {
 
             if (data === "start_unban_tg") {
                 this.unbanStates.set(userId, "waiting_unban_tg")
+                await this.bot.answerCallbackQuery(query.id)
                 const bannedList = await db.getBannedUsers()
-                let msg = "🔓 *Разбан Telegram пользователя*\n\n"
+                let msg = "🔓 *Разбан Telegram пользователя*
+
+"
                 if (bannedList.length === 0) {
-                    msg += "Список забаненных TG пользователей пуст.\n\n"
+                    msg += "Список забаненных TG пользователей пуст.
+
+"
                 } else {
-                    msg += "*Забаненные TG пользователи:*\n"
+                    msg += "*Забаненные TG пользователи:*
+"
                     bannedList.forEach(u => {
-                        msg += `• ID: \`${u.user_id}\`${u.username ? ` (@${u.username})` : ""}\n`
+                        msg += "• ID: " + u.user_id + (u.username ? " (@" + u.username + ")" : "") + "
+"
                     })
-                    msg += "\n"
+                    msg += "
+"
                 }
                 msg += "Введите ID или @username для разбана:"
                 await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
-                await this.bot.answerCallbackQuery(query.id)
                 return
             }
-
+            
             if (data === "start_unban_vk") {
                 this.unbanStates.set(userId, "waiting_unban_vk")
-                let msg = "🔓 *Разбан ВКонтакте пользователя*\n\n"
+                await this.bot.answerCallbackQuery(query.id)
+                let msg = "🔓 *Разбан ВКонтакте пользователя*
+
+"
                 if (this.vkBridge && this.vkBridge.bannedVkUsers.size > 0) {
-                    msg += "*Локально забаненные VK пользователи (ID):*\n"
-                    this.vkBridge.bannedVkUsers.forEach(id => { msg += `• \`${id}\`\n` })
-                    msg += "\n"
+                    msg += "*Локально забаненные VK пользователи (ID):*
+"
+                    this.vkBridge.bannedVkUsers.forEach(id => { msg += "• " + id + "
+" })
+                    msg += "
+"
                 } else {
-                    msg += "Список локально забаненных VK пользователей пуст.\n\n"
+                    msg += "Список локально забаненных VK пользователей пуст.
+
+"
                 }
                 msg += "Введите VK ID пользователя для разбана (числовой ID из vk.com/id***):"
                 await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
-                await this.bot.answerCallbackQuery(query.id)
                 return
             }
 
