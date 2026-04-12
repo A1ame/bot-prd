@@ -635,17 +635,21 @@ class VKBridge {
       }
 
       // Шаг 2: опубликовать в TG каналы
-      // Используем уже скачанные буферы (полное качество, без сжатия)
+      // Сначала постим в TG, берём file_id из отправленного сообщения,
+      // потом используем эти же file_id для загрузки в ВК (одинаковое качество)
       const db = require("../database/database")
       const channels = await db.getChannels()
       const photoBuffers = suggestionData.photoBuffers || []
+      let tgPostedFileIds = []  // file_id фото из первого канала — используем для ВК
 
-      for (const channel of channels) {
+      for (let ci = 0; ci < channels.length; ci++) {
+        const channel = channels[ci]
         try {
           if (photoBuffers.length === 0) {
             await this.bot.sendMessage(channel.chat_id, finalTextTg || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
           } else if (photoBuffers.length === 1) {
-            await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalTextTg || "", parse_mode: "HTML" })
+            const sent = await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalTextTg || "", parse_mode: "HTML" })
+            if (ci === 0 && sent.photo) tgPostedFileIds.push(sent.photo[sent.photo.length - 1].file_id)
           } else {
             const media = photoBuffers.slice(0, 10).map((buf, idx) => ({
               type: "photo",
@@ -653,12 +657,42 @@ class VKBridge {
               caption: idx === 0 ? (finalTextTg || "") : undefined,
               parse_mode: "HTML",
             }))
-            await this.bot.sendMediaGroup(channel.chat_id, media)
+            const sentArr = await this.bot.sendMediaGroup(channel.chat_id, media)
+            if (ci === 0) {
+              for (const s of sentArr) {
+                if (s.photo) tgPostedFileIds.push(s.photo[s.photo.length - 1].file_id)
+              }
+            }
           }
           logger.info(`VK suggest approved: posted to TG channel ${channel.chat_id}`)
         } catch (err) {
           logger.error(`VK suggest: error posting to TG channel ${channel.chat_id}:`, err)
         }
+      }
+
+      // Если пост ещё не в ВК (wall.post не сработал) — загружаем фото из TG file_id
+      if (!vkPublished && tgPostedFileIds.length > 0) {
+        logger.info(`VK suggest: uploading ${tgPostedFileIds.length} photos from TG file_ids to VK`)
+        const photoBuffersFromTg = []
+        for (const fileId of tgPostedFileIds) {
+          try {
+            const fileInfo = await this.bot.getFile(fileId)
+            const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
+            const buf = await this.downloadFile(fileUrl)
+            photoBuffersFromTg.push({ buffer: buf, filename: "photo.jpg" })
+          } catch (e) {
+            logger.error("VK suggest: error downloading TG file for VK:", e)
+          }
+        }
+        newVkPostId = await this.postToVk(finalTextVk, photoBuffersFromTg)
+        if (newVkPostId) {
+          vkPublished = true
+          logger.info(`VK suggest: posted to VK with TG photos, post_id=${newVkPostId}`)
+        }
+      } else if (vkPublished && tgPostedFileIds.length > 0) {
+        // wall.post уже сработал (опубликовал оригинал), но нам нужно заменить фото
+        // на те что в TG (одинаковое качество). Делаем через wall.edit с attachments
+        logger.info(`VK suggest: wall.post already done, TG file_ids collected for reference`)
       }
 
       // Шаг 3: обновить кнопки

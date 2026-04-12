@@ -100,11 +100,13 @@ class AdminBot {
                 // Обработка ввода ID для разбана
                 if (this.unbanStates.get(userId) === "waiting_unban_id" && msg.text) {
                     const input = msg.text.trim()
-                    // unbanUser поддерживает и числовой ID и @username (ищет в БД)
+                    // Показываем список забаненных перед разбаном для диагностики
+                    const bannedList = await db.getBannedUsers()
+                    logger.info(`Unban attempt: input="${input}", banned_users=${JSON.stringify(bannedList)}`)
+
                     const changes = await db.unbanUser(input)
                     if (changes > 0) {
                         await this.bot.sendMessage(chatId, `✅ Пользователь ${input} разбанен — теперь может писать боту.`)
-                        // Пробуем уведомить пользователя если знаем его ID
                         if (!input.startsWith("@")) {
                             const targetId = parseInt(input)
                             if (!isNaN(targetId)) {
@@ -112,10 +114,17 @@ class AdminBot {
                             }
                         }
                     } else {
-                        await this.bot.sendMessage(chatId,
-                            `❌ Пользователь ${input} не найден в списке забаненных.\n\n` +
-                            `Проверьте правильность ID или @username.`
-                        )
+                        // Показываем что реально в БД
+                        let listMsg = `❌ Пользователь *${input}* не найден в списке забаненных.\n\n`
+                        if (bannedList.length === 0) {
+                            listMsg += `Список забаненных пуст.`
+                        } else {
+                            listMsg += `*Забаненные пользователи:*\n`
+                            bannedList.forEach(u => {
+                                listMsg += `• ID: \`${u.user_id}\`${u.username ? ` (@${u.username})` : ""}\n`
+                            })
+                        }
+                        await this.bot.sendMessage(chatId, listMsg, { parse_mode: "Markdown" })
                     }
                     this.unbanStates.delete(userId)
                     return
@@ -441,12 +450,19 @@ class AdminBot {
 
             if (data === "start_unban") {
                 this.unbanStates.set(userId, "waiting_unban_id")
-                await this.bot.sendMessage(chatId,
-                    "🔓 *Разбан пользователя*\n\n" +
-                    "Введите ID пользователя или его @username:\n" +
-                    "Пример: `123456789` или `@username`",
-                    { parse_mode: "Markdown" }
-                )
+                const bannedList = await db.getBannedUsers()
+                let msg = "🔓 *Разбан пользователя*\n\n"
+                if (bannedList.length === 0) {
+                    msg += "Список забаненных пуст.\n\n"
+                } else {
+                    msg += "*Забаненные пользователи:*\n"
+                    bannedList.forEach(u => {
+                        msg += `• ID: \`${u.user_id}\`${u.username ? ` (@${u.username})` : ""}\n`
+                    })
+                    msg += "\n"
+                }
+                msg += "Введите ID или @username для разбана:"
+                await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
                 await this.bot.answerCallbackQuery(query.id)
                 return
             }

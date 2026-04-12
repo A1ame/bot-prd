@@ -350,16 +350,24 @@ class Database {
 
   unbanUser(userIdOrUsername) {
     return new Promise((resolve, reject) => {
-      // Поддерживаем и числовой ID и @username
-      const isId = !isNaN(parseInt(userIdOrUsername)) && !String(userIdOrUsername).startsWith("@")
-      const sql = isId
-        ? `DELETE FROM banned_users WHERE user_id = ?`
-        : `DELETE FROM banned_users WHERE username = ?`
-      const param = isId ? parseInt(userIdOrUsername) : String(userIdOrUsername).replace("@", "").toLowerCase()
-      this.db.run(sql, [param], function(err) {
-        if (err) reject(err)
-        else resolve(this.changes)
-      })
+      const input = String(userIdOrUsername).trim()
+      const cleanUsername = input.replace(/^@/, "").toLowerCase()
+      const numericId = parseInt(input)
+      const isNumeric = !isNaN(numericId) && !input.startsWith("@")
+
+      if (isNumeric) {
+        // Ищем по числовому ID
+        this.db.run(`DELETE FROM banned_users WHERE user_id = ?`, [numericId], function(err) {
+          if (err) reject(err)
+          else resolve(this.changes)
+        })
+      } else {
+        // Ищем по username (без @, без учёта регистра)
+        this.db.run(`DELETE FROM banned_users WHERE LOWER(username) = ?`, [cleanUsername], function(err) {
+          if (err) reject(err)
+          else resolve(this.changes)
+        })
+      }
     })
   }
 
