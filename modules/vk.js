@@ -172,7 +172,7 @@ class VKBridge {
         name: filename,
         wallpost: 0,
         no_comments: 0,
-      })
+      }, true)  // video.save requires user token
       // uploadServer.upload_url — куда загружать
       const uploaded = await this.multipartUploadVideo(uploadServer.upload_url, fileBuffer, filename)
       logger.info(`VK video uploaded: owner_id=${uploadServer.owner_id}, video_id=${uploadServer.video_id}`)
@@ -325,14 +325,36 @@ class VKBridge {
           if (photoUrls.length === 0 && (!videoData || videoData.length === 0)) {
             await this.bot.sendMessage(channel.chat_id, text || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
           } else if (videoData && videoData.length > 0) {
-            // Видео из ВК — ссылки (прямой URL VK не отдаёт)
-            const parts = []
-            if (text) parts.push(text)
-            parts.push("\ud83c\udfa5 Видео из ВКонтакте:")
-            videoData.forEach((v, i) => {
-              parts.push((i + 1) + ". " + (v.title ? v.title + " — " : "") + v.videoUrl)
-            })
-            await this.bot.sendMessage(channel.chat_id, parts.join("\n"), { disable_web_page_preview: false })
+            // Видео из ВК — пробуем получить прямую ссылку через video.get
+            for (const v of videoData) {
+              try {
+                const directUrl = await this.getDirectVideoUrl(v.ownerId, v.videoId)
+                if (directUrl) {
+                  logger.info(`VK->TG: sending video directly, url=${directUrl.substring(0, 60)}...`)
+                  await this.bot.sendVideo(channel.chat_id, directUrl, {
+                    caption: text || "",
+                    supports_streaming: true,
+                  })
+                } else {
+                  // Fallback: скачиваем превью и отправляем как фото с текстом
+                  logger.warn(`VK->TG: no direct URL for video ${v.videoId}, sending thumb`)
+                  if (v.thumbUrl) {
+                    await this.bot.sendPhoto(channel.chat_id, v.thumbUrl, {
+                      caption: (text || "") + `
+
+🎬 ${v.title || "Видео"}: ${v.videoUrl}`,
+                    })
+                  } else {
+                    await this.bot.sendMessage(channel.chat_id, (text || "") + `
+
+🎬 ${v.title || "Видео"}: ${v.videoUrl}`)
+                  }
+                }
+              } catch (err) {
+                logger.error(`VK->TG: error sending video:`, err)
+              }
+            }
+            // Если есть и фото — отправляем отдельно
             if (photoUrls.length === 1) {
               await this.bot.sendPhoto(channel.chat_id, photoUrls[0])
             } else if (photoUrls.length > 1) {
@@ -657,8 +679,29 @@ class VKBridge {
       }
 
       // Отправляем в админский чат с полными фото (буферы)
-      if (photoBuffers.length === 0) {
+      if (photoBuffers.length === 0 && videoData.length === 0) {
         await this.bot.sendMessage(config.adminChatId, adminMessage, { parse_mode: "Markdown", ...keyboard })
+      } else if (videoData.length > 0 && photoBuffers.length === 0) {
+        // Только видео — пробуем получить прямую ссылку
+        let videoSent = false
+        for (const v of videoData) {
+          const directUrl = await this.getDirectVideoUrl(v.ownerId, v.videoId)
+          if (directUrl) {
+            try {
+              await this.bot.sendVideo(config.adminChatId, directUrl, {
+                caption: adminMessage,
+                parse_mode: "Markdown",
+                supports_streaming: true,
+                ...keyboard,
+              })
+              videoSent = true
+              break
+            } catch (e) { logger.warn(`suggest video send failed: ${e.message}`) }
+          }
+        }
+        if (!videoSent) {
+          await this.bot.sendMessage(config.adminChatId, adminMessage, { parse_mode: "Markdown", ...keyboard })
+        }
       } else if (photoBuffers.length === 1) {
         await this.bot.sendPhoto(config.adminChatId, photoBuffers[0], { caption: adminMessage, parse_mode: "Markdown", ...keyboard })
       } else {
@@ -936,21 +979,44 @@ class VKBridge {
   }
 
   extractVkVideoData(post) {
-    // Возвращает список { type, url/attachment } для видео из поста
     const videos = []
     if (!post.attachments) return videos
     for (const att of post.attachments) {
       if (att.type === "video" && att.video) {
-        // VK не отдаёт прямой URL видео через Long Poll — используем attachment строку
-        // для встраивания через sendVideo с URL страницы
         const v = att.video
-        // Берём URL превью (thumbnail) для отправки как видео-превью
         const thumbUrl = v.image ? v.image[v.image.length - 1]?.url : null
         const videoUrl = `https://vk.com/video${v.owner_id}_${v.id}`
         videos.push({ ownerId: v.owner_id, videoId: v.id, thumbUrl, videoUrl, title: v.title || "" })
       }
     }
     return videos
+  }
+
+  // Получить прямую ссылку на видео через video.get (требует user token)
+  async getDirectVideoUrl(ownerId, videoId) {
+    try {
+      const res = await this.vkApi("video.get", {
+        videos: `${ownerId}_${videoId}`,
+        extended: 0,
+      }, true)  // user token
+      if (res && res.items && res.items.length > 0) {
+        const v = res.items[0]
+        // files содержит прямые ссылки: mp4_1080, mp4_720, mp4_480, mp4_360, mp4_240
+        const files = v.files || {}
+        const qualities = ["mp4_1080", "mp4_720", "mp4_480", "mp4_360", "mp4_240"]
+        for (const q of qualities) {
+          if (files[q]) {
+            logger.info(`VK direct video URL found: quality=${q}`)
+            return files[q]
+          }
+        }
+        // Если нет прямых ссылок — fallback на external
+        if (files.external) return files.external
+      }
+    } catch (e) {
+      logger.warn(`video.get failed: ${e.message}`)
+    }
+    return null
   }
 
   extractVkPhotoUrls(post) {
