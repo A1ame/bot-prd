@@ -499,23 +499,24 @@ class AdminBot {
                     msg += "\n"
                 }
                 msg += "Введите ID или @username для разбана:"
-                await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
+                await this.bot.sendMessage(chatId, msg)
                 return
             }
             
             if (data === "start_unban_vk") {
                 this.unbanStates.set(userId, "waiting_unban_vk")
                 await this.bot.answerCallbackQuery(query.id)
-                let msg = "🔓 *Разбан ВКонтакте пользователя*\n\n"
+                let lines = ["🔓 Разбан ВКонтакте пользователя", ""]
                 if (this.vkBridge && this.vkBridge.bannedVkUsers.size > 0) {
-                    msg += "*Локально забаненные VK пользователи (ID):*\n"
-                    this.vkBridge.bannedVkUsers.forEach(id => { msg += "• " + id + "\n" })
-                    msg += "\n"
+                    lines.push("Локально забаненные VK пользователи (ID):")
+                    this.vkBridge.bannedVkUsers.forEach(id => lines.push("• " + id))
+                    lines.push("")
                 } else {
-                    msg += "Список локально забаненных VK пользователей пуст.\n\n"
+                    lines.push("Список локально забаненных VK пользователей пуст.")
+                    lines.push("")
                 }
-                msg += "Введите VK ID пользователя для разбана (числовой ID из vk.com/id***):"
-                await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
+                lines.push("Введите VK ID пользователя для разбана (например: 123456789):")
+                await this.bot.sendMessage(chatId, lines.join("\n"))
                 return
             }
 
