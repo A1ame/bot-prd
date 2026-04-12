@@ -27,6 +27,7 @@ class AdminBot {
         this.channelManager = new ChannelManager(this.bot)
         this.schedulerManager = null
         this.floodTracker = new Map()
+        this.unbanStates = new Map()  // userId -> waiting_unban_id
 
         // Инициализация VK Bridge
         if (config.vkToken && config.vkGroupId && config.vkGroupId !== "YOUR_VK_GROUP_ID_HERE") {
@@ -96,6 +97,24 @@ class AdminBot {
             }
 
             if (isAdmin && isAdminChat) {
+                // Обработка ввода ID для разбана
+                if (this.unbanStates.get(userId) === "waiting_unban_id" && msg.text) {
+                    const input = msg.text.trim()
+                    const targetId = input.startsWith("@")
+                        ? await this._resolveUsername(input, chatId)
+                        : parseInt(input)
+
+                    if (targetId && !isNaN(targetId)) {
+                        await db.unbanUser(targetId)
+                        await this.bot.sendMessage(chatId, `✅ Пользователь ${input} (ID: ${targetId}) разбанен — теперь может писать боту.`)
+                        try { await this.bot.sendMessage(targetId, "✅ Вы разблокированы и снова можете отправлять предложения.") } catch (e) {}
+                    } else {
+                        await this.bot.sendMessage(chatId, `❌ Не удалось найти пользователя: ${input}\nВведите числовой ID или @username.`)
+                    }
+                    this.unbanStates.delete(userId)
+                    return
+                }
+
                 if (msg.text === "/start" || msg.text === "/admin") {
                     await this.showAdminPanel(chatId)
                     return
@@ -414,6 +433,18 @@ class AdminBot {
                 return
             }
 
+            if (data === "start_unban") {
+                this.unbanStates.set(userId, "waiting_unban_id")
+                await this.bot.sendMessage(chatId,
+                    "🔓 *Разбан пользователя*\n\n" +
+                    "Введите ID пользователя или его @username:\n" +
+                    "Пример: `123456789` или `@username`",
+                    { parse_mode: "Markdown" }
+                )
+                await this.bot.answerCallbackQuery(query.id)
+                return
+            }
+
             if (data.startsWith("unban_bot_")) {
                 const userId = parseInt(data.replace("unban_bot_", ""))
                 try {
@@ -566,9 +597,18 @@ class AdminBot {
             `${vkStatus}\n\n` +
             `Выберите раздел для управления:`
 
+        const keyboard = {
+            reply_markup: {
+                inline_keyboard: [
+                    ...(keyboards.adminMain?.reply_markup?.inline_keyboard || []),
+                    [{ text: "🔓 Разбанить пользователя", callback_data: "start_unban" }],
+                ]
+            }
+        }
+
         await this.bot.sendMessage(chatId, message, {
             parse_mode: "Markdown",
-            ...keyboards.adminMain,
+            ...keyboard,
         })
     }
 
@@ -660,6 +700,21 @@ class AdminBot {
             "⚙️ Настройки канала будут добавлены в следующем обновлении",
             keyboards.backToMain,
         )
+    }
+
+    async _resolveUsername(usernameWithAt, chatId) {
+        try {
+            const member = await this.bot.getChatMember(chatId, usernameWithAt)
+            return member?.user?.id || null
+        } catch (e) {
+            // Попробуем через getChat
+            try {
+                const chat = await this.bot.getChat(usernameWithAt)
+                return chat?.id || null
+            } catch (e2) {
+                return null
+            }
+        }
     }
 
     isAdmin(userId) {

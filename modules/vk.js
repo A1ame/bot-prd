@@ -500,6 +500,18 @@ class VKBridge {
       const text = this.formatVkPostText(post)
       const photoUrls = this.extractVkPhotoUrls(post)
 
+      // Скачиваем фото сразу в полном качестве
+      const photoBuffers = []
+      for (const url of photoUrls) {
+        try {
+          const buf = await this.downloadFile(url)
+          photoBuffers.push(buf)
+          logger.info(`VK suggest ${post.id}: downloaded photo ${photoBuffers.length}/${photoUrls.length}, size=${buf.length}`)
+        } catch (e) {
+          logger.error(`VK suggest ${post.id}: failed to download photo:`, e)
+        }
+      }
+
       let authorInfo = "Неизвестный пользователь"
       if (post.from_id && post.from_id > 0) {
         try {
@@ -538,21 +550,23 @@ class VKBridge {
         },
       }
 
-      if (photoUrls.length === 0) {
+      // Отправляем в админский чат с полными фото (буферы)
+      if (photoBuffers.length === 0) {
         await this.bot.sendMessage(config.adminChatId, adminMessage, { parse_mode: "Markdown", ...keyboard })
-      } else if (photoUrls.length === 1) {
-        await this.bot.sendPhoto(config.adminChatId, photoUrls[0], { caption: adminMessage, parse_mode: "Markdown", ...keyboard })
+      } else if (photoBuffers.length === 1) {
+        await this.bot.sendPhoto(config.adminChatId, photoBuffers[0], { caption: adminMessage, parse_mode: "Markdown", ...keyboard })
       } else {
-        const media = photoUrls.slice(0, 10).map((url, idx) => ({
+        const media = photoBuffers.slice(0, 10).map((buf, idx) => ({
           type: "photo",
-          media: url,
+          media: buf,
           caption: idx === 0 ? (text || "") : undefined,
         }))
         await this.bot.sendMediaGroup(config.adminChatId, media)
         await this.bot.sendMessage(config.adminChatId, adminMessage, { parse_mode: "Markdown", ...keyboard })
       }
 
-      this.pendingVkSuggestions.set(post.id, { status: "pending", text, photoUrls, authorInfo, post })
+      // Сохраняем буферы вместо URL
+      this.pendingVkSuggestions.set(post.id, { status: "pending", text, photoUrls, photoBuffers, authorInfo, post })
       this.handledSuggestIds.add(post.id)
       logger.info(`VK suggest ${post.id} sent to admin chat`)
     } catch (error) {
@@ -609,29 +623,19 @@ class VKBridge {
       }
 
       // Шаг 2: опубликовать в TG каналы
-      // Скачиваем фото полностью чтобы не было сжатия (VK URL дают превью)
+      // Используем уже скачанные буферы (полное качество, без сжатия)
       const db = require("../database/database")
       const channels = await db.getChannels()
-
-      const photoInputFiles = []
-      for (const url of suggestionData.photoUrls) {
-        try {
-          const buf = await this.downloadFile(url)
-          photoInputFiles.push(buf)
-          logger.info(`VK suggest: downloaded full photo for TG, size=${buf.length}`)
-        } catch (e) {
-          logger.error("VK suggest: failed to download photo for TG:", e)
-        }
-      }
+      const photoBuffers = suggestionData.photoBuffers || []
 
       for (const channel of channels) {
         try {
-          if (photoInputFiles.length === 0) {
+          if (photoBuffers.length === 0) {
             await this.bot.sendMessage(channel.chat_id, finalText || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
-          } else if (photoInputFiles.length === 1) {
-            await this.bot.sendPhoto(channel.chat_id, photoInputFiles[0], { caption: finalText || "", parse_mode: "HTML" })
+          } else if (photoBuffers.length === 1) {
+            await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalText || "", parse_mode: "HTML" })
           } else {
-            const media = photoInputFiles.slice(0, 10).map((buf, idx) => ({
+            const media = photoBuffers.slice(0, 10).map((buf, idx) => ({
               type: "photo",
               media: buf,
               caption: idx === 0 ? (finalText || "") : undefined,
