@@ -470,7 +470,7 @@ class VKBridge {
         this._stats.wallPostsNew++
         logger.info(`VK: new wall post id=${post.id}, forwarding to TG...`)
         const text = this.formatVkPostText(post)
-        const photoUrls = this.extractVkPhotoUrls(post)
+        const photoUrls = await this.getFullPhotoUrls(post)
         await this.postToTelegram(text, photoUrls, String(post.id))
       }
     } catch (error) {
@@ -498,7 +498,8 @@ class VKBridge {
       }
 
       const text = this.formatVkPostText(post)
-      const photoUrls = this.extractVkPhotoUrls(post)
+      // Используем photos.getById для получения оригинального размера фото
+      const photoUrls = await this.getFullPhotoUrls(post)
 
       // Скачиваем фото сразу в полном качестве
       const photoBuffers = []
@@ -589,8 +590,12 @@ class VKBridge {
 
       const cleanChannelId = String(this.vkGroupId)
       const suggestLink = `https://t.me/${config.botName}?start=${cleanChannelId}_channel`
-      const guideText = withGuide ? `\n\n📒 Хочешь чтобы твоё сообщение попало в канал — пиши <a href="${suggestLink}">сюда</a>` : ""
-      const finalText = (suggestionData.text || "") + guideText
+      // Разные тексты гайда для TG и VK
+      const guideTgText = withGuide ? `\n\n📒 Хочешь чтобы твоё сообщение попало в канал — пиши <a href="${suggestLink}">сюда</a>` : ""
+      const guideVkText = withGuide ? `\n\nЕсли ты хочешь, чтобы новость попала в Подслушку, пролистай вверх и нажми на кнопку "Предложить новость"` : ""
+      const finalTextTg = (suggestionData.text || "") + guideTgText
+      const finalTextVk = (suggestionData.text || "") + guideVkText
+      const finalText = finalTextTg  // для TG используем TG-текст
 
       // Шаг 1: опубликовать в ВК
       let vkPublished = false
@@ -618,7 +623,7 @@ class VKBridge {
             logger.error("Error downloading photo for re-upload:", err)
           }
         }
-        newVkPostId = await this.postToVk(finalText, photoBuffers)
+        newVkPostId = await this.postToVk(finalTextVk, photoBuffers)
         if (newVkPostId) vkPublished = true
       }
 
@@ -631,14 +636,14 @@ class VKBridge {
       for (const channel of channels) {
         try {
           if (photoBuffers.length === 0) {
-            await this.bot.sendMessage(channel.chat_id, finalText || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
+            await this.bot.sendMessage(channel.chat_id, finalTextTg || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
           } else if (photoBuffers.length === 1) {
-            await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalText || "", parse_mode: "HTML" })
+            await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalTextTg || "", parse_mode: "HTML" })
           } else {
             const media = photoBuffers.slice(0, 10).map((buf, idx) => ({
               type: "photo",
               media: buf,
-              caption: idx === 0 ? (finalText || "") : undefined,
+              caption: idx === 0 ? (finalTextTg || "") : undefined,
               parse_mode: "HTML",
             }))
             await this.bot.sendMediaGroup(channel.chat_id, media)
@@ -798,6 +803,55 @@ class VKBridge {
       }
     }
     return urls
+  }
+
+  // Получить список photo_ids из поста для запроса через photos.getById
+  extractVkPhotoIds(post) {
+    const ids = []
+    if (!post.attachments) return ids
+    for (const att of post.attachments) {
+      if (att.type === "photo" && att.photo) {
+        // Формат: owner_id_photo_id
+        ids.push(`${att.photo.owner_id}_${att.photo.id}`)
+      }
+    }
+    return ids
+  }
+
+  // Получить максимальные URL фото через photos.getById (оригинальное качество)
+  async getFullPhotoUrls(post) {
+    const photoIds = this.extractVkPhotoIds(post)
+    if (photoIds.length === 0) return []
+    try {
+      const photos = await this.vkApi("photos.getById", {
+        photos: photoIds.join(","),
+        photo_sizes: 1,
+      })
+      const urls = []
+      for (const photo of photos) {
+        const sizes = photo.sizes || []
+        // Тип w — оригинал, затем z, y, x по убыванию
+        const priority = ["w", "z", "y", "x", "r", "q", "p", "o", "m", "s"]
+        let best = null
+        for (const t of priority) {
+          best = sizes.find(s => s.type === t)
+          if (best) break
+        }
+        if (!best) {
+          // fallback: максимум по ширине
+          sizes.sort((a, b) => (b.width || 0) - (a.width || 0))
+          best = sizes[0]
+        }
+        if (best) {
+          urls.push(best.url)
+          logger.info(`VK photo ${photo.id}: using size type=${best.type}, ${best.width}x${best.height}`)
+        }
+      }
+      return urls
+    } catch (e) {
+      logger.warn(`photos.getById failed: ${e.message} — falling back to attachment URLs`)
+      return this.extractVkPhotoUrls(post)
+    }
   }
 
   // ─────────────────────────────────────────────

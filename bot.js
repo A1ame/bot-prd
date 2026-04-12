@@ -100,16 +100,28 @@ class AdminBot {
                 // Обработка ввода ID для разбана
                 if (this.unbanStates.get(userId) === "waiting_unban_id" && msg.text) {
                     const input = msg.text.trim()
-                    const targetId = input.startsWith("@")
-                        ? await this._resolveUsername(input, chatId)
-                        : parseInt(input)
+                    let targetId = null
+                    if (input.startsWith("@")) {
+                        targetId = await this._resolveUsername(input)
+                        if (!targetId) {
+                            await this.bot.sendMessage(chatId,
+                                `❌ Не удалось найти пользователя ${input}\n\n` +
+                                `Попробуйте указать числовой ID пользователя вместо @username.\n` +
+                                `ID можно узнать через @userinfobot`
+                            )
+                            this.unbanStates.delete(userId)
+                            return
+                        }
+                    } else {
+                        targetId = parseInt(input)
+                    }
 
                     if (targetId && !isNaN(targetId)) {
                         await db.unbanUser(targetId)
                         await this.bot.sendMessage(chatId, `✅ Пользователь ${input} (ID: ${targetId}) разбанен — теперь может писать боту.`)
                         try { await this.bot.sendMessage(targetId, "✅ Вы разблокированы и снова можете отправлять предложения.") } catch (e) {}
                     } else {
-                        await this.bot.sendMessage(chatId, `❌ Не удалось найти пользователя: ${input}\nВведите числовой ID или @username.`)
+                        await this.bot.sendMessage(chatId, `❌ Неверный формат. Введите числовой ID или @username.`)
                     }
                     this.unbanStates.delete(userId)
                     return
@@ -702,18 +714,14 @@ class AdminBot {
         )
     }
 
-    async _resolveUsername(usernameWithAt, chatId) {
+    async _resolveUsername(usernameWithAt) {
         try {
-            const member = await this.bot.getChatMember(chatId, usernameWithAt)
-            return member?.user?.id || null
+            // Telegram позволяет получить chat/user по username через getChat
+            const chat = await this.bot.getChat(usernameWithAt)
+            return chat?.id || null
         } catch (e) {
-            // Попробуем через getChat
-            try {
-                const chat = await this.bot.getChat(usernameWithAt)
-                return chat?.id || null
-            } catch (e2) {
-                return null
-            }
+            logger.warn(`_resolveUsername: could not resolve ${usernameWithAt}: ${e.message}`)
+            return null
         }
     }
 
