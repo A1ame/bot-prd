@@ -590,58 +590,17 @@ class VKBridge {
 
       const cleanChannelId = String(this.vkGroupId)
       const suggestLink = `https://t.me/${config.botName}?start=${cleanChannelId}_channel`
-      // Разные тексты гайда для TG и VK
       const guideTgText = withGuide ? `\n\n📒 Хочешь чтобы твоё сообщение попало в канал — пиши <a href="${suggestLink}">сюда</a>` : ""
       const guideVkText = withGuide ? `\n\nЕсли ты хочешь, чтобы новость попала в Подслушку, пролистай вверх и нажми на кнопку "Предложить новость"` : ""
       const finalTextTg = (suggestionData.text || "") + guideTgText
       const finalTextVk = (suggestionData.text || "") + guideVkText
-      const finalText = finalTextTg  // для TG используем TG-текст
 
-      // Шаг 1: опубликовать в ВК
-      let vkPublished = false
-      let newVkPostId = null
-      try {
-        const res = await this.vkApi("wall.post", {
-          owner_id: `-${this.vkGroupId}`,
-          post_id: postId,
-          from_group: 1,
-        })
-        newVkPostId = res.post_id
-        // Блокируем Long Poll чтобы не задублировать в TG
-        this.processedVkPosts.add(String(newVkPostId || postId))
-        setTimeout(() => this.processedVkPosts.delete(String(newVkPostId || postId)), 10 * 60 * 1000)
-        vkPublished = true
-        logger.info(`VK suggest ${postId}: published, new_post_id=${newVkPostId}`)
-
-        // Если нужен гайд — редактируем опубликованный пост
-        if (withGuide && newVkPostId && finalTextVk) {
-          try {
-            await this.vkApi("wall.edit", {
-              owner_id: `-${this.vkGroupId}`,
-              post_id: newVkPostId,
-              message: finalTextVk,
-            })
-            logger.info(`VK suggest ${postId}: guide text added via wall.edit`)
-          } catch (editErr) {
-            logger.warn(`wall.edit failed: ${editErr.message}`)
-          }
-        }
-      } catch (publishErr) {
-        logger.warn(`wall.post(post_id=${postId}) failed: ${publishErr.message} — fallback to re-upload`)
-        // Используем уже скачанные буферы (то же качество что показано в предложке)
-        const photoBuffers = (suggestionData.photoBuffers || []).map(buf => ({ buffer: buf, filename: "photo.jpg" }))
-        newVkPostId = await this.postToVk(finalTextVk, photoBuffers)
-        if (newVkPostId) vkPublished = true
-      }
-
-      // Шаг 2: опубликовать в TG каналы
-      // Сначала постим в TG, берём file_id из отправленного сообщения,
-      // потом используем эти же file_id для загрузки в ВК (одинаковое качество)
       const db = require("../database/database")
       const channels = await db.getChannels()
       const photoBuffers = suggestionData.photoBuffers || []
-      let tgPostedFileIds = []  // file_id фото из первого канала — используем для ВК
 
+      // Шаг 1: постим в TG каналы, собираем file_id из первого канала
+      let tgPostedFileIds = []
       for (let ci = 0; ci < channels.length; ci++) {
         const channel = channels[ci]
         try {
@@ -652,8 +611,7 @@ class VKBridge {
             if (ci === 0 && sent.photo) tgPostedFileIds.push(sent.photo[sent.photo.length - 1].file_id)
           } else {
             const media = photoBuffers.slice(0, 10).map((buf, idx) => ({
-              type: "photo",
-              media: buf,
+              type: "photo", media: buf,
               caption: idx === 0 ? (finalTextTg || "") : undefined,
               parse_mode: "HTML",
             }))
@@ -670,29 +628,43 @@ class VKBridge {
         }
       }
 
-      // Если пост ещё не в ВК (wall.post не сработал) — загружаем фото из TG file_id
-      if (!vkPublished && tgPostedFileIds.length > 0) {
-        logger.info(`VK suggest: uploading ${tgPostedFileIds.length} photos from TG file_ids to VK`)
-        const photoBuffersFromTg = []
+      // Шаг 2: постим в ВК — всегда создаём новый пост с нашим текстом и фото из TG
+      // (НЕ используем wall.post с post_id — он публикует оригинал без изменений)
+      let vkPublished = false
+      let newVkPostId = null
+
+      const photoBuffersForVk = []
+      if (tgPostedFileIds.length > 0) {
+        // Скачиваем фото из TG (то же качество что в канале)
+        logger.info(`VK suggest: downloading ${tgPostedFileIds.length} photos from TG for VK`)
         for (const fileId of tgPostedFileIds) {
           try {
             const fileInfo = await this.bot.getFile(fileId)
             const fileUrl = `https://api.telegram.org/file/bot${config.botToken}/${fileInfo.file_path}`
             const buf = await this.downloadFile(fileUrl)
-            photoBuffersFromTg.push({ buffer: buf, filename: "photo.jpg" })
+            photoBuffersForVk.push({ buffer: buf, filename: "photo.jpg" })
           } catch (e) {
             logger.error("VK suggest: error downloading TG file for VK:", e)
           }
         }
-        newVkPostId = await this.postToVk(finalTextVk, photoBuffersFromTg)
-        if (newVkPostId) {
-          vkPublished = true
-          logger.info(`VK suggest: posted to VK with TG photos, post_id=${newVkPostId}`)
-        }
-      } else if (vkPublished && tgPostedFileIds.length > 0) {
-        // wall.post уже сработал (опубликовал оригинал), но нам нужно заменить фото
-        // на те что в TG (одинаковое качество). Делаем через wall.edit с attachments
-        logger.info(`VK suggest: wall.post already done, TG file_ids collected for reference`)
+      } else if (photoBuffers.length > 0) {
+        // Если TG не отдал file_id — используем буферы из предложки
+        photoBuffers.forEach(buf => photoBuffersForVk.push({ buffer: buf, filename: "photo.jpg" }))
+      }
+
+      // Сначала удаляем оригинальный предложенный пост чтобы не было дублей в ВК
+      try {
+        await this.vkApi("wall.delete", { owner_id: `-${this.vkGroupId}`, post_id: postId })
+        logger.info(`VK suggest ${postId}: original suggest post deleted`)
+      } catch (e) {
+        logger.warn(`VK suggest: could not delete original post ${postId}: ${e.message}`)
+      }
+
+      // Публикуем новый пост с нашим текстом
+      newVkPostId = await this.postToVk(finalTextVk, photoBuffersForVk)
+      if (newVkPostId) {
+        vkPublished = true
+        logger.info(`VK suggest ${postId}: new post created with guide, vk_post_id=${newVkPostId}`)
       }
 
       // Шаг 3: обновить кнопки
