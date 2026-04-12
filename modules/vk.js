@@ -600,15 +600,18 @@ class VKBridge {
       const photoBuffers = suggestionData.photoBuffers || []
 
       // Шаг 1: постим в TG каналы, собираем file_id из первого канала
+      // Блокируем channel_post событие для этих каналов чтобы не улетело обратно в ВК
+      const tgPostDedupeKey = `vk_suggest_tg_${postId}_${Date.now()}`
       let tgPostedFileIds = []
       for (let ci = 0; ci < channels.length; ci++) {
         const channel = channels[ci]
         try {
+          let sentMsg = null
           if (photoBuffers.length === 0) {
-            await this.bot.sendMessage(channel.chat_id, finalTextTg || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
+            sentMsg = await this.bot.sendMessage(channel.chat_id, finalTextTg || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
           } else if (photoBuffers.length === 1) {
-            const sent = await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalTextTg || "", parse_mode: "HTML" })
-            if (ci === 0 && sent.photo) tgPostedFileIds.push(sent.photo[sent.photo.length - 1].file_id)
+            sentMsg = await this.bot.sendPhoto(channel.chat_id, photoBuffers[0], { caption: finalTextTg || "", parse_mode: "HTML" })
+            if (ci === 0 && sentMsg.photo) tgPostedFileIds.push(sentMsg.photo[sentMsg.photo.length - 1].file_id)
           } else {
             const media = photoBuffers.slice(0, 10).map((buf, idx) => ({
               type: "photo", media: buf,
@@ -621,6 +624,13 @@ class VKBridge {
                 if (s.photo) tgPostedFileIds.push(s.photo[s.photo.length - 1].file_id)
               }
             }
+            sentMsg = sentArr ? sentArr[0] : null
+          }
+          // Блокируем channel_post для этого сообщения чтобы не пошло в ВК повторно
+          if (sentMsg) {
+            const blockKey = `tg_${channel.chat_id}_${sentMsg.message_id}`
+            this.processedTgPosts.add(blockKey)
+            setTimeout(() => this.processedTgPosts.delete(blockKey), 60 * 1000)
           }
           logger.info(`VK suggest approved: posted to TG channel ${channel.chat_id}`)
         } catch (err) {
@@ -661,10 +671,15 @@ class VKBridge {
       }
 
       // Публикуем новый пост с нашим текстом
+      // postToVk без dedupeKey не блокирует Long Poll — блокируем вручную заранее
+      // (добавляем заглушку, которую заменим реальным post_id после публикации)
       newVkPostId = await this.postToVk(finalTextVk, photoBuffersForVk)
       if (newVkPostId) {
         vkPublished = true
-        logger.info(`VK suggest ${postId}: new post created with guide, vk_post_id=${newVkPostId}`)
+        // Блокируем Long Poll чтобы новый пост не улетел обратно в TG
+        this.processedVkPosts.add(String(newVkPostId))
+        setTimeout(() => this.processedVkPosts.delete(String(newVkPostId)), 10 * 60 * 1000)
+        logger.info(`VK suggest ${postId}: new post created, vk_post_id=${newVkPostId}, blocked in Long Poll`)
       }
 
       // Шаг 3: обновить кнопки
