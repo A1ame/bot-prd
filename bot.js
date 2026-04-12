@@ -361,23 +361,38 @@ class AdminBot {
             }
 
             // ✅ Обработка действий с предложениями из ВК
+            if (data.startsWith("vk_approve_guide_")) {
+                const postId = parseInt(data.replace("vk_approve_guide_", ""))
+                if (this.vkBridge) await this.vkBridge.approveVkSuggestWithGuide(postId, query)
+                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
+                return
+            }
+
             if (data.startsWith("vk_approve_")) {
                 const postId = parseInt(data.replace("vk_approve_", ""))
-                if (this.vkBridge) {
-                    await this.vkBridge.approveVkSuggest(postId, query)
-                } else {
-                    await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
-                }
+                if (this.vkBridge) await this.vkBridge.approveVkSuggest(postId, query)
+                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
                 return
             }
 
             if (data.startsWith("vk_reject_")) {
                 const postId = parseInt(data.replace("vk_reject_", ""))
-                if (this.vkBridge) {
-                    await this.vkBridge.rejectVkSuggest(postId, query)
-                } else {
-                    await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
-                }
+                if (this.vkBridge) await this.vkBridge.rejectVkSuggest(postId, query)
+                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
+                return
+            }
+
+            if (data.startsWith("vk_ban_")) {
+                const postId = parseInt(data.replace("vk_ban_", ""))
+                if (this.vkBridge) await this.vkBridge.banVkSuggestAuthor(postId, query)
+                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
+                return
+            }
+
+            if (data.startsWith("vk_forward_")) {
+                const postId = parseInt(data.replace("vk_forward_", ""))
+                if (this.vkBridge) await this.vkBridge.forwardVkSuggestToMainAdmin(postId, query)
+                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
                 return
             }
 

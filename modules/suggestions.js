@@ -158,6 +158,13 @@ class SuggestionsManager {
         try {
             const userId = msg.from.id
 
+            // Проверяем бан
+            const isBanned = await db.isUserBanned(userId)
+            if (isBanned) {
+                await this.bot.sendMessage(msg.chat.id, "🚫 Вы заблокированы и не можете отправлять предложения.")
+                return
+            }
+
             // Проверяем, есть ли сохраненный канал для пользователя
             const lastChannelId = this.lastUserChannels.get(userId)
 
@@ -707,26 +714,23 @@ class SuggestionsManager {
 
     async banSuggestionAuthor(suggestion, channel, callbackQuery) {
         try {
-            await this.bot.banChatMember(suggestion.chat_id, suggestion.user_id);
+            // Баним пользователя в боте (через БД) — он больше не сможет писать боту
+            await db.banUser(suggestion.user_id);
             await db.updateSuggestionStatus(suggestion.id, "banned");
 
             await this.bot.editMessageReplyMarkup(
-                { inline_keyboard: [[{ text: "🚫 АВТОР ЗАБАНЕН", callback_data: "noop" }]] },
+                { inline_keyboard: [[{ text: "🚫 АВТОР ЗАБАНЕН В БОТЕ", callback_data: "noop" }]] },
                 { chat_id: config.adminChatId, message_id: suggestion.admin_message_id }
             );
 
             try {
                 await this.bot.sendMessage(
                     suggestion.user_id,
-                    `🚫 Вы были заблокированы в канале ${channel?.title || channel?.username} за нарушение правил.`,
-                    { reply_to_message_id: suggestion.original_message_id }
+                    `🚫 Вы заблокированы и больше не можете отправлять предложения.`
                 );
-            } catch (error) {
-                await this.bot.sendMessage(
-                    suggestion.user_id,
-                    `🚫 Вы были заблокированы в канале ${channel?.title || channel?.username} за нарушение правил.`);
-            }
-            await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Автор забанен!" });
+            } catch (error) { /* пользователь мог заблокировать бота */ }
+
+            await this.bot.answerCallbackQuery(callbackQuery.id, { text: "🚫 Автор забанен в боте!" });
         } catch (error) {
             logger.error("Error banning suggestion author:", error);
             await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка при бане" });

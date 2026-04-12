@@ -510,10 +510,19 @@ class VKBridge {
 
       const keyboard = {
         reply_markup: {
-          inline_keyboard: [[
-            { text: "✅ Принять (ТГ + ВК)", callback_data: `vk_approve_${post.id}` },
-            { text: "❌ Отклонить", callback_data: `vk_reject_${post.id}` },
-          ]],
+          inline_keyboard: [
+            [
+              { text: "✅ Принять (ТГ + ВК)", callback_data: `vk_approve_${post.id}` },
+              { text: "✅ Принять с гайдом", callback_data: `vk_approve_guide_${post.id}` },
+            ],
+            [
+              { text: "❌ Отклонить", callback_data: `vk_reject_${post.id}` },
+              { text: "🚫 Забанить автора", callback_data: `vk_ban_${post.id}` },
+            ],
+            [
+              { text: "➡️ К главному админу", callback_data: `vk_forward_${post.id}` },
+            ],
+          ],
         },
       }
 
@@ -543,7 +552,7 @@ class VKBridge {
   // ─────────────────────────────────────────────
   // ПРИНЯТЬ предложку из ВК
   // ─────────────────────────────────────────────
-  async approveVkSuggest(postId, callbackQuery) {
+  async approveVkSuggest(postId, callbackQuery, withGuide = false) {
     try {
       const suggestionData = this.pendingVkSuggestions.get(postId)
 
@@ -552,21 +561,27 @@ class VKBridge {
         return
       }
 
+      const cleanChannelId = String(this.vkGroupId)
+      const suggestLink = `https://t.me/${config.botName}?start=${cleanChannelId}_channel`
+      const guideText = withGuide ? `\n\n📒 Хочешь чтобы твоё сообщение попало в канал — пиши <a href="${suggestLink}">сюда</a>` : ""
+      const finalText = (suggestionData.text || "") + guideText
+
       // Шаг 1: опубликовать в ВК
       let vkPublished = false
+      let newVkPostId = null
       try {
-        // Пробуем опубликовать существующий предложенный пост
-        await this.vkApi("wall.post", {
+        const res = await this.vkApi("wall.post", {
           owner_id: `-${this.vkGroupId}`,
           post_id: postId,
           from_group: 1,
         })
-        this.processedVkPosts.add(String(postId))
-        setTimeout(() => this.processedVkPosts.delete(String(postId)), 10 * 60 * 1000)
+        newVkPostId = res.post_id
+        // Блокируем Long Poll чтобы не задублировать в TG
+        this.processedVkPosts.add(String(newVkPostId || postId))
+        setTimeout(() => this.processedVkPosts.delete(String(newVkPostId || postId)), 10 * 60 * 1000)
         vkPublished = true
-        logger.info(`VK suggest ${postId}: published via wall.post(post_id)`)
+        logger.info(`VK suggest ${postId}: published, new_post_id=${newVkPostId}`)
       } catch (publishErr) {
-        // Fallback: создаём новый пост
         logger.warn(`wall.post(post_id=${postId}) failed: ${publishErr.message} — fallback to re-upload`)
         const photoBuffers = []
         for (const url of suggestionData.photoUrls) {
@@ -577,31 +592,117 @@ class VKBridge {
             logger.error("Error downloading photo for re-upload:", err)
           }
         }
-        const newPostId = await this.postToVk(suggestionData.text, photoBuffers)
-        if (newPostId) {
-          vkPublished = true
-          logger.info(`VK suggest ${postId}: published as new post ${newPostId}`)
+        newVkPostId = await this.postToVk(finalText, photoBuffers)
+        if (newVkPostId) vkPublished = true
+      }
+
+      // Шаг 2: опубликовать в TG каналы (БЕЗ дедупликации через processedVkPosts — 
+      // мы уже заблокировали Long Poll через processedVkPosts выше)
+      const db = require("../database/database")
+      const channels = await db.getChannels()
+      for (const channel of channels) {
+        try {
+          if (suggestionData.photoUrls.length === 0) {
+            await this.bot.sendMessage(channel.chat_id, finalText || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
+          } else if (suggestionData.photoUrls.length === 1) {
+            await this.bot.sendPhoto(channel.chat_id, suggestionData.photoUrls[0], { caption: finalText || "", parse_mode: "HTML" })
+          } else {
+            const media = suggestionData.photoUrls.slice(0, 10).map((url, idx) => ({
+              type: "photo", media: url,
+              caption: idx === 0 ? (finalText || "") : undefined,
+              parse_mode: "HTML",
+            }))
+            await this.bot.sendMediaGroup(channel.chat_id, media)
+          }
+          logger.info(`VK suggest approved: posted to TG channel ${channel.chat_id}`)
+        } catch (err) {
+          logger.error(`VK suggest: error posting to TG channel ${channel.chat_id}:`, err)
         }
       }
 
-      // Шаг 2: дублировать в TG каналы
-      await this.postToTelegram(suggestionData.text, suggestionData.photoUrls, `vk_suggest_approved_${postId}`)
-
       // Шаг 3: обновить кнопки
       try {
-        const label = vkPublished ? "✅ ПРИНЯТО (ТГ + ВК)" : "✅ ПРИНЯТО (только ТГ)"
+        const label = vkPublished
+          ? (withGuide ? "✅ ПРИНЯТО С ГАЙДОМ (ТГ + ВК)" : "✅ ПРИНЯТО (ТГ + ВК)")
+          : "✅ ПРИНЯТО (только ТГ)"
         await this.bot.editMessageReplyMarkup(
           { inline_keyboard: [[{ text: label, callback_data: "noop" }]] },
           { chat_id: callbackQuery.message.chat.id, message_id: callbackQuery.message.message_id }
         )
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
 
-      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "✅ Опубликовано в ТГ и ВК!" })
+      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "✅ Опубликовано!" })
       this.pendingVkSuggestions.delete(postId)
-      logger.info(`VK suggest ${postId} approved`)
+      this.handledSuggestIds.add(postId)
+      logger.info(`VK suggest ${postId} approved (withGuide=${withGuide})`)
     } catch (error) {
       logger.error("Error approving VK suggest:", error)
       await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка при публикации" })
+    }
+  }
+
+  async approveVkSuggestWithGuide(postId, callbackQuery) {
+    return this.approveVkSuggest(postId, callbackQuery, true)
+  }
+
+  async banVkSuggestAuthor(postId, callbackQuery) {
+    try {
+      const suggestionData = this.pendingVkSuggestions.get(postId)
+      if (!suggestionData || typeof suggestionData === "string") {
+        await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Предложение не найдено" })
+        return
+      }
+
+      const authorVkId = suggestionData.post?.from_id
+      // Баним в ВК группе если есть from_id
+      if (authorVkId && authorVkId > 0) {
+        try {
+          await this.vkApi("groups.ban", {
+            group_id: this.vkGroupId,
+            owner_id: authorVkId,
+            comment: "Забанен за нарушение правил предложки",
+          })
+          logger.info(`VK suggest ${postId}: banned VK user ${authorVkId}`)
+        } catch (e) {
+          logger.warn(`Could not ban VK user ${authorVkId}: ${e.message}`)
+        }
+      }
+
+      // Удаляем пост из предложки
+      try {
+        await this.vkApi("wall.delete", { owner_id: `-${this.vkGroupId}`, post_id: postId })
+      } catch (e) {}
+
+      try {
+        await this.bot.editMessageReplyMarkup(
+          { inline_keyboard: [[{ text: "🚫 АВТОР ЗАБАНЕН В ВК", callback_data: "noop" }]] },
+          { chat_id: callbackQuery.message.chat.id, message_id: callbackQuery.message.message_id }
+        )
+      } catch (e) {}
+
+      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "🚫 Автор забанен в ВК группе" })
+      this.pendingVkSuggestions.delete(postId)
+      this.handledSuggestIds.add(postId)
+    } catch (error) {
+      logger.error("Error banning VK suggest author:", error)
+      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка при бане" })
+    }
+  }
+
+  async forwardVkSuggestToMainAdmin(postId, callbackQuery) {
+    try {
+      try {
+        await this.bot.editMessageReplyMarkup(
+          { inline_keyboard: [[{ text: "➡️ ОТПРАВЛЕНО К ГЛАВНОМУ АДМИНУ", callback_data: "noop" }]] },
+          { chat_id: callbackQuery.message.chat.id, message_id: callbackQuery.message.message_id }
+        )
+      } catch (e) {}
+      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Отправлено к главному админу" })
+      this.pendingVkSuggestions.delete(postId)
+      this.handledSuggestIds.add(postId)
+    } catch (error) {
+      logger.error("Error forwarding VK suggest:", error)
+      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка" })
     }
   }
 

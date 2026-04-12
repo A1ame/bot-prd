@@ -77,6 +77,12 @@ class Database {
         warning_count INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
+
+      `CREATE TABLE IF NOT EXISTS banned_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER UNIQUE NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
     ]
 
     tables.forEach((sql) => {
@@ -327,6 +333,34 @@ class Database {
             else resolve(this.changes)
         }
         )
+    })
+  }
+
+  banUser(userId) {
+    return new Promise((resolve, reject) => {
+      const sql = `INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)`
+      this.db.run(sql, [userId], function(err) {
+        if (err) reject(err)
+        else resolve(this.changes)
+      })
+    })
+  }
+
+  unbanUser(userId) {
+    return new Promise((resolve, reject) => {
+      this.db.run(`DELETE FROM banned_users WHERE user_id = ?`, [userId], function(err) {
+        if (err) reject(err)
+        else resolve(this.changes)
+      })
+    })
+  }
+
+  isUserBanned(userId) {
+    return new Promise((resolve, reject) => {
+      this.db.get(`SELECT 1 FROM banned_users WHERE user_id = ?`, [userId], (err, row) => {
+        if (err) reject(err)
+        else resolve(!!row)
+      })
     })
   }
 
