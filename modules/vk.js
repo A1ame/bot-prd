@@ -320,56 +320,44 @@ class VKBridge {
         return
       }
 
+      // Собираем все медиа заранее (получаем прямые URL видео)
+      const allMediaItems = []  // { type, url, isDownloaded }
+      for (const url of photoUrls) {
+        allMediaItems.push({ type: "photo", url })
+      }
+      for (const v of (videoData || [])) {
+        const directUrl = await this.getDirectVideoUrl(v.ownerId, v.videoId)
+        if (directUrl) {
+          allMediaItems.push({ type: "video", url: directUrl })
+        } else if (v.thumbUrl) {
+          // fallback — превью как фото
+          allMediaItems.push({ type: "photo", url: v.thumbUrl, fallbackCaption: `🎬 ${v.title || "Видео"}: ${v.videoUrl}` })
+        }
+      }
+
       for (const channel of channels) {
         try {
-          if (photoUrls.length === 0 && (!videoData || videoData.length === 0)) {
+          if (allMediaItems.length === 0) {
+            // Только текст
             await this.bot.sendMessage(channel.chat_id, text || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
-          } else if (videoData && videoData.length > 0) {
-            // Видео из ВК — пробуем получить прямую ссылку через video.get
-            for (const v of videoData) {
-              try {
-                const directUrl = await this.getDirectVideoUrl(v.ownerId, v.videoId)
-                if (directUrl) {
-                  logger.info(`VK->TG: sending video directly, url=${directUrl.substring(0, 60)}...`)
-                  await this.bot.sendVideo(channel.chat_id, directUrl, {
-                    caption: text || "",
-                    supports_streaming: true,
-                  })
-                } else {
-                  // Fallback: скачиваем превью и отправляем как фото с текстом
-                  logger.warn(`VK->TG: no direct URL for video ${v.videoId}, sending thumb`)
-                  if (v.thumbUrl) {
-                    await this.bot.sendPhoto(channel.chat_id, v.thumbUrl, {
-                      caption: (text || "") + `
-
-🎬 ${v.title || "Видео"}: ${v.videoUrl}`,
-                    })
-                  } else {
-                    await this.bot.sendMessage(channel.chat_id, (text || "") + `
-
-🎬 ${v.title || "Видео"}: ${v.videoUrl}`)
-                  }
-                }
-              } catch (err) {
-                logger.error(`VK->TG: error sending video:`, err)
-              }
+          } else if (allMediaItems.length === 1) {
+            const item = allMediaItems[0]
+            const caption = item.fallbackCaption ? (text ? text + "\n\n" + item.fallbackCaption : item.fallbackCaption) : (text || "")
+            if (item.type === "video") {
+              await this.bot.sendVideo(channel.chat_id, item.url, { caption, supports_streaming: true, parse_mode: "HTML" })
+            } else {
+              await this.bot.sendPhoto(channel.chat_id, item.url, { caption, parse_mode: "HTML" })
             }
-            // Если есть и фото — отправляем отдельно
-            if (photoUrls.length === 1) {
-              await this.bot.sendPhoto(channel.chat_id, photoUrls[0])
-            } else if (photoUrls.length > 1) {
-              const media = photoUrls.slice(0, 10).map(url => ({ type: "photo", media: url }))
-              await this.bot.sendMediaGroup(channel.chat_id, media)
-            }
-          } else if (photoUrls.length === 1) {
-            await this.bot.sendPhoto(channel.chat_id, photoUrls[0], { caption: text || "", parse_mode: "HTML" })
           } else {
-            const media = photoUrls.slice(0, 10).map((url, idx) => ({
-              type: "photo", media: url,
+            // Медиагруппа — видео и фото вместе
+            const mediaGroup = allMediaItems.slice(0, 10).map((item, idx) => ({
+              type: item.type,
+              media: item.url,
               caption: idx === 0 ? (text || "") : undefined,
-              parse_mode: "HTML",
+              parse_mode: idx === 0 ? "HTML" : undefined,
+              supports_streaming: item.type === "video" ? true : undefined,
             }))
-            await this.bot.sendMediaGroup(channel.chat_id, media)
+            await this.bot.sendMediaGroup(channel.chat_id, mediaGroup)
           }
           logger.info(`VK->TG: posted to channel ${channel.chat_id}`)
         } catch (err) {
