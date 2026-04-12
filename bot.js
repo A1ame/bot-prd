@@ -98,34 +98,70 @@ class AdminBot {
 
             if (isAdmin && isAdminChat) {
                 // Обработка ввода ID для разбана
-                if (this.unbanStates.get(userId) === "waiting_unban_id" && msg.text) {
+                const unbanState = this.unbanStates.get(userId)
+                if ((unbanState === "waiting_unban_tg" || unbanState === "waiting_unban_vk") && msg.text) {
                     const input = msg.text.trim()
-                    // Показываем список забаненных перед разбаном для диагностики
-                    const bannedList = await db.getBannedUsers()
-                    logger.info(`Unban attempt: input="${input}", banned_users=${JSON.stringify(bannedList)}`)
 
-                    const changes = await db.unbanUser(input)
-                    if (changes > 0) {
-                        await this.bot.sendMessage(chatId, `✅ Пользователь ${input} разбанен — теперь может писать боту.`)
-                        if (!input.startsWith("@")) {
-                            const targetId = parseInt(input)
-                            if (!isNaN(targetId)) {
-                                try { await this.bot.sendMessage(targetId, "✅ Вы разблокированы и снова можете отправлять предложения.") } catch (e) {}
+                    if (unbanState === "waiting_unban_tg") {
+                        const bannedList = await db.getBannedUsers()
+                        logger.info(`TG unban attempt: input="${input}", banned=${JSON.stringify(bannedList)}`)
+                        const changes = await db.unbanUser(input)
+                        if (changes > 0) {
+                            await this.bot.sendMessage(chatId, `✅ TG пользователь ${input} разбанен — теперь может писать боту.`)
+                            if (!input.startsWith("@")) {
+                                const targetId = parseInt(input)
+                                if (!isNaN(targetId)) {
+                                    try { await this.bot.sendMessage(targetId, "✅ Вы разблокированы и снова можете отправлять предложения.") } catch (e) {}
+                                }
                             }
-                        }
-                    } else {
-                        // Показываем что реально в БД
-                        let listMsg = `❌ Пользователь *${input}* не найден в списке забаненных.\n\n`
-                        if (bannedList.length === 0) {
-                            listMsg += `Список забаненных пуст.`
                         } else {
-                            listMsg += `*Забаненные пользователи:*\n`
-                            bannedList.forEach(u => {
-                                listMsg += `• ID: \`${u.user_id}\`${u.username ? ` (@${u.username})` : ""}\n`
-                            })
+                            let listMsg = `❌ TG пользователь *${input}* не найден в списке забаненных.\n\n`
+                            if (bannedList.length === 0) {
+                                listMsg += `Список забаненных пуст.`
+                            } else {
+                                listMsg += `*Забаненные TG пользователи:*\n`
+                                bannedList.forEach(u => {
+                                    listMsg += `• ID: \`${u.user_id}\`${u.username ? ` (@${u.username})` : ""}\n`
+                                })
+                            }
+                            await this.bot.sendMessage(chatId, listMsg, { parse_mode: "Markdown" })
                         }
-                        await this.bot.sendMessage(chatId, listMsg, { parse_mode: "Markdown" })
+                    } else if (unbanState === "waiting_unban_vk") {
+                        const vkId = parseInt(input)
+                        if (isNaN(vkId) || vkId <= 0) {
+                            await this.bot.sendMessage(chatId, `❌ Неверный формат. Введите числовой VK ID (например: 123456789)`)
+                            this.unbanStates.delete(userId)
+                            return
+                        }
+                        if (this.vkBridge) {
+                            const wasBanned = this.vkBridge.bannedVkUsers.has(vkId)
+                            this.vkBridge.bannedVkUsers.delete(vkId)
+                            // Также разбаниваем в группе ВК через API
+                            try {
+                                await this.vkBridge.vkApi("groups.unban", {
+                                    group_id: this.vkBridge.vkGroupId,
+                                    owner_id: vkId,
+                                })
+                                await this.bot.sendMessage(chatId, `✅ VK пользователь ${vkId} разбанен в группе ВКонтакте.`)
+                                logger.info(`VK user ${vkId} unbanned via groups.unban`)
+                            } catch (e) {
+                                if (wasBanned) {
+                                    await this.bot.sendMessage(chatId, `✅ VK пользователь ${vkId} удалён из локального бан-листа.\n⚠️ groups.unban не сработал: ${e.message}`)
+                                } else {
+                                    await this.bot.sendMessage(chatId, `⚠️ VK пользователь ${vkId} не найден в локальном бан-листе.\nПопробую разбанить в группе ВК...`)
+                                    try {
+                                        await this.vkBridge.vkApi("groups.unban", { group_id: this.vkBridge.vkGroupId, owner_id: vkId })
+                                        await this.bot.sendMessage(chatId, `✅ VK пользователь ${vkId} разбанен в группе ВКонтакте.`)
+                                    } catch (e2) {
+                                        await this.bot.sendMessage(chatId, `❌ Не удалось разбанить VK пользователя ${vkId}: ${e2.message}`)
+                                    }
+                                }
+                            }
+                        } else {
+                            await this.bot.sendMessage(chatId, "❌ VK Bridge не подключён.")
+                        }
                     }
+
                     this.unbanStates.delete(userId)
                     return
                 }
@@ -448,20 +484,36 @@ class AdminBot {
                 return
             }
 
-            if (data === "start_unban") {
-                this.unbanStates.set(userId, "waiting_unban_id")
+            if (data === "start_unban_tg") {
+                this.unbanStates.set(userId, "waiting_unban_tg")
                 const bannedList = await db.getBannedUsers()
-                let msg = "🔓 *Разбан пользователя*\n\n"
+                let msg = "🔓 *Разбан Telegram пользователя*\n\n"
                 if (bannedList.length === 0) {
-                    msg += "Список забаненных пуст.\n\n"
+                    msg += "Список забаненных TG пользователей пуст.\n\n"
                 } else {
-                    msg += "*Забаненные пользователи:*\n"
+                    msg += "*Забаненные TG пользователи:*\n"
                     bannedList.forEach(u => {
                         msg += `• ID: \`${u.user_id}\`${u.username ? ` (@${u.username})` : ""}\n`
                     })
                     msg += "\n"
                 }
                 msg += "Введите ID или @username для разбана:"
+                await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
+                await this.bot.answerCallbackQuery(query.id)
+                return
+            }
+
+            if (data === "start_unban_vk") {
+                this.unbanStates.set(userId, "waiting_unban_vk")
+                let msg = "🔓 *Разбан ВКонтакте пользователя*\n\n"
+                if (this.vkBridge && this.vkBridge.bannedVkUsers.size > 0) {
+                    msg += "*Локально забаненные VK пользователи (ID):*\n"
+                    this.vkBridge.bannedVkUsers.forEach(id => { msg += `• \`${id}\`\n` })
+                    msg += "\n"
+                } else {
+                    msg += "Список локально забаненных VK пользователей пуст.\n\n"
+                }
+                msg += "Введите VK ID пользователя для разбана (числовой ID из vk.com/id***):"
                 await this.bot.sendMessage(chatId, msg, { parse_mode: "Markdown" })
                 await this.bot.answerCallbackQuery(query.id)
                 return
@@ -623,7 +675,10 @@ class AdminBot {
             reply_markup: {
                 inline_keyboard: [
                     ...(keyboards.adminMain?.reply_markup?.inline_keyboard || []),
-                    [{ text: "🔓 Разбанить пользователя", callback_data: "start_unban" }],
+                    [
+                        { text: "🔓 Разбанить TG пользователя", callback_data: "start_unban_tg" },
+                        { text: "🔓 Разбанить VK пользователя", callback_data: "start_unban_vk" },
+                    ],
                 ]
             }
         }
