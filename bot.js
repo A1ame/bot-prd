@@ -414,6 +414,21 @@ class AdminBot {
                 return
             }
 
+            if (data.startsWith("unban_bot_")) {
+                const userId = parseInt(data.replace("unban_bot_", ""))
+                try {
+                    await db.unbanUser(userId)
+                    await this.bot.answerCallbackQuery(query.id, { text: "✅ Пользователь разбанен" })
+                    await this.bot.sendMessage(chatId, `✅ Пользователь ${userId} разбанен — теперь может писать боту`)
+                    try {
+                        await this.bot.sendMessage(userId, "✅ Вы разблокированы и снова можете отправлять предложения.")
+                    } catch (e) {}
+                } catch (e) {
+                    await this.bot.answerCallbackQuery(query.id, { text: "Ошибка при разбане" })
+                }
+                return
+            }
+
             if (data.startsWith("remove_warnings_") || data.startsWith("unban_user_")) {
                 await this.handleModerationAction(query)
                 return

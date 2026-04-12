@@ -32,6 +32,7 @@ class VKBridge {
     // Предложения из ВК, ожидающие решения
     this.pendingVkSuggestions = new Map()
     this.handledSuggestIds = new Set()
+    this.bannedVkUsers = new Set()  // локальный бан VK юзеров (сбрасывается при рестарте)
 
     // Long Poll
     this.lpServer = null
@@ -485,6 +486,17 @@ class VKBridge {
       if (this.pendingVkSuggestions.has(post.id)) return
       this.pendingVkSuggestions.set(post.id, "processing")
 
+      // Проверяем локальный бан
+      if (post.from_id && this.bannedVkUsers.has(post.from_id)) {
+        logger.info(`VK suggest ${post.id}: author ${post.from_id} is banned, auto-deleting`)
+        try {
+          await this.vkApi("wall.delete", { owner_id: `-${this.vkGroupId}`, post_id: post.id })
+        } catch (e) {}
+        this.pendingVkSuggestions.delete(post.id)
+        this.handledSuggestIds.add(post.id)
+        return
+      }
+
       const text = this.formatVkPostText(post)
       const photoUrls = this.extractVkPhotoUrls(post)
 
@@ -596,19 +608,32 @@ class VKBridge {
         if (newVkPostId) vkPublished = true
       }
 
-      // Шаг 2: опубликовать в TG каналы (БЕЗ дедупликации через processedVkPosts — 
-      // мы уже заблокировали Long Poll через processedVkPosts выше)
+      // Шаг 2: опубликовать в TG каналы
+      // Скачиваем фото полностью чтобы не было сжатия (VK URL дают превью)
       const db = require("../database/database")
       const channels = await db.getChannels()
+
+      const photoInputFiles = []
+      for (const url of suggestionData.photoUrls) {
+        try {
+          const buf = await this.downloadFile(url)
+          photoInputFiles.push(buf)
+          logger.info(`VK suggest: downloaded full photo for TG, size=${buf.length}`)
+        } catch (e) {
+          logger.error("VK suggest: failed to download photo for TG:", e)
+        }
+      }
+
       for (const channel of channels) {
         try {
-          if (suggestionData.photoUrls.length === 0) {
+          if (photoInputFiles.length === 0) {
             await this.bot.sendMessage(channel.chat_id, finalText || "Новый пост из ВКонтакте", { parse_mode: "HTML" })
-          } else if (suggestionData.photoUrls.length === 1) {
-            await this.bot.sendPhoto(channel.chat_id, suggestionData.photoUrls[0], { caption: finalText || "", parse_mode: "HTML" })
+          } else if (photoInputFiles.length === 1) {
+            await this.bot.sendPhoto(channel.chat_id, photoInputFiles[0], { caption: finalText || "", parse_mode: "HTML" })
           } else {
-            const media = suggestionData.photoUrls.slice(0, 10).map((url, idx) => ({
-              type: "photo", media: url,
+            const media = photoInputFiles.slice(0, 10).map((buf, idx) => ({
+              type: "photo",
+              media: buf,
               caption: idx === 0 ? (finalText || "") : undefined,
               parse_mode: "HTML",
             }))
@@ -654,33 +679,47 @@ class VKBridge {
       }
 
       const authorVkId = suggestionData.post?.from_id
-      // Баним в ВК группе если есть from_id
+      let banResult = "не удалось получить ID автора"
+
       if (authorVkId && authorVkId > 0) {
+        // Добавляем в локальный бан-лист (блокирует предложки через Long Poll)
+        this.bannedVkUsers.add(authorVkId)
+
+        // Баним в ВК группе через groups.ban (требует manage права в токене)
         try {
           await this.vkApi("groups.ban", {
             group_id: this.vkGroupId,
             owner_id: authorVkId,
+            reason: 4,
             comment: "Забанен за нарушение правил предложки",
+            comment_visible: 1,
           })
-          logger.info(`VK suggest ${postId}: banned VK user ${authorVkId}`)
+          banResult = `VK user ${authorVkId} забанен в группе`
+          logger.info(`VK suggest ${postId}: banned VK user ${authorVkId} via groups.ban`)
         } catch (e) {
-          logger.warn(`Could not ban VK user ${authorVkId}: ${e.message}`)
+          // groups.ban может не работать с групповым токеном — тогда только локальный бан
+          banResult = `локальный бан VK user ${authorVkId} (groups.ban: ${e.message})`
+          logger.warn(`groups.ban failed for ${authorVkId}: ${e.message} — using local ban only`)
         }
       }
 
-      // Удаляем пост из предложки
+      // Удаляем пост из предложки ВК
       try {
         await this.vkApi("wall.delete", { owner_id: `-${this.vkGroupId}`, post_id: postId })
-      } catch (e) {}
+        logger.info(`VK suggest ${postId}: deleted from wall`)
+      } catch (e) {
+        logger.warn(`Could not delete VK suggest post ${postId}: ${e.message}`)
+      }
 
       try {
         await this.bot.editMessageReplyMarkup(
-          { inline_keyboard: [[{ text: "🚫 АВТОР ЗАБАНЕН В ВК", callback_data: "noop" }]] },
+          { inline_keyboard: [[{ text: "🚫 АВТОР ЗАБАНЕН", callback_data: "noop" }]] },
           { chat_id: callbackQuery.message.chat.id, message_id: callbackQuery.message.message_id }
         )
       } catch (e) {}
 
-      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "🚫 Автор забанен в ВК группе" })
+      await this.bot.answerCallbackQuery(callbackQuery.id, { text: "🚫 Автор забанен" })
+      logger.info(`VK suggest ${postId} ban result: ${banResult}`)
       this.pendingVkSuggestions.delete(postId)
       this.handledSuggestIds.add(postId)
     } catch (error) {

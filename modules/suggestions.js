@@ -730,6 +730,19 @@ class SuggestionsManager {
                 );
             } catch (error) { /* пользователь мог заблокировать бота */ }
 
+            // Кнопка разбана в сообщении админа
+            try {
+                await this.bot.editMessageReplyMarkup(
+                    {
+                        inline_keyboard: [[
+                            { text: "🚫 АВТОР ЗАБАНЕН В БОТЕ", callback_data: "noop" },
+                            { text: "🔓 Разбанить", callback_data: `unban_bot_${suggestion.user_id}` }
+                        ]]
+                    },
+                    { chat_id: config.adminChatId, message_id: suggestion.admin_message_id }
+                )
+            } catch (e) {}
+
             await this.bot.answerCallbackQuery(callbackQuery.id, { text: "🚫 Автор забанен в боте!" });
         } catch (error) {
             logger.error("Error banning suggestion author:", error);
