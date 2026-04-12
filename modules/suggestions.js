@@ -407,11 +407,18 @@ class SuggestionsManager {
             .map((m) => {
                 if (m.photo) return { type: "photo", media: m.photo[m.photo.length - 1].file_id }
                 if (m.video) return { type: "video", media: m.video.file_id }
+                if (m.document && m.document.mime_type) {
+                    if (m.document.mime_type.startsWith("video/")) return { type: "video", media: m.document.file_id }
+                    if (m.document.mime_type.startsWith("image/")) return { type: "photo", media: m.document.file_id }
+                }
                 return null
             })
             .filter(Boolean)
 
         const userText = messages[0].caption || ""
+
+        // Сохраняем file_id вместе с типом: "type:file_id"
+        const fileIdsWithType = media.map(m => m.type + ":" + m.media)
 
         const suggestionId = await db.addSuggestion(
             userId,
@@ -420,7 +427,7 @@ class SuggestionsManager {
             messages[0].message_id,
             "album",
             isPrivate ? chatId : null,
-            media.map((m) => m.media),
+            fileIdsWithType,
             messages[0].caption || ""
         )
 
@@ -557,14 +564,16 @@ class SuggestionsManager {
             const photoBuffers = []
 
             if (suggestion.content_type === "album" && suggestion.file_ids) {
-                for (const fileId of suggestion.file_ids) {
+                const parsedMedia = this._parseFileIds(suggestion.file_ids)
+                for (const item of parsedMedia) {
                     try {
-                        const fileInfo = await this.bot.getFile(fileId)
+                        const fileInfo = await this.bot.getFile(item.media)
                         const fileUrl = `https://api.telegram.org/file/bot${require("../config/config").botToken}/${fileInfo.file_path}`
                         const buffer = await this.vkBridge.downloadFile(fileUrl)
-                        photoBuffers.push({ buffer, filename: "photo.jpg" })
+                        const isVideo = item.type === "video"
+                        photoBuffers.push({ buffer, filename: isVideo ? "video.mp4" : "photo.jpg", type: item.type })
                     } catch (e) {
-                        logger.error("_postSuggestionToVk: error downloading album photo:", e)
+                        logger.error("_postSuggestionToVk: error downloading album media:", e)
                     }
                 }
             } else if (suggestion.content_type === "photo" && suggestion.original_message_id && suggestion.original_chat_id) {
@@ -593,6 +602,17 @@ class SuggestionsManager {
         }
     }
 
+    _parseFileIds(fileIds) {
+        if (!fileIds || !Array.isArray(fileIds)) return []
+        return fileIds.map(f => {
+            if (typeof f === "string" && (f.startsWith("photo:") || f.startsWith("video:"))) {
+                const [type, ...rest] = f.split(":")
+                return { type, media: rest.join(":") }
+            }
+            return { type: "photo", media: f }  // backward compat
+        })
+    }
+
     async approveSuggestionWithGuide(suggestion, channel, callbackQuery) {
         try {
             const cleanChannelId = channel.chat_id.startsWith('-') ? channel.chat_id.slice(1) : channel.chat_id;
@@ -600,9 +620,10 @@ class SuggestionsManager {
             const textToSend = (suggestion.caption || "") +`\n\n📒 Хочешь чтобы твое сообщение попало в канал, пиши сюда <a href="${suggestLink}">сюда</a>\n Эту ссылку так же можно найти в описании канала`;
 
             if (suggestion.content_type === "album" && suggestion.file_ids) {
-                const media = suggestion.file_ids.map((file_id, idx) => ({
-                    type: "photo",
-                    media: file_id,
+                const parsedMedia = this._parseFileIds(suggestion.file_ids)
+                const media = parsedMedia.map((item, idx) => ({
+                    type: item.type,
+                    media: item.media,
                     caption: idx === 0 ? textToSend : undefined,
                     parse_mode: "HTML"
                 }));
@@ -647,9 +668,10 @@ class SuggestionsManager {
     async approveSuggestion(suggestion, channel, callbackQuery) {
         try {
             if (suggestion.content_type === "album" && suggestion.file_ids) {
-                const media = suggestion.file_ids.map((file_id, idx) => ({
-                    type: "photo",
-                    media: file_id,
+                const parsedMedia = this._parseFileIds(suggestion.file_ids)
+                const media = parsedMedia.map((item, idx) => ({
+                    type: item.type,
+                    media: item.media,
                     caption: idx === 0 ? suggestion.caption || "" : undefined
                 }));
                 await this.bot.sendMediaGroup(suggestion.chat_id, media);
