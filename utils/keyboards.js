@@ -18,6 +18,7 @@ const keyboards = {
           { text: "➕ Добавить канал", callback_data: "add_channel" },
           { text: "📋 Список каналов", callback_data: "list_channels" },
         ],
+        [{ text: "⚙️ Настройки каналов", callback_data: "channel_settings" }],
         [{ text: "🔙 Назад", callback_data: "admin_main" }],
       ],
     },
