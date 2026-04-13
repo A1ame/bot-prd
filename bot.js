@@ -29,17 +29,45 @@ class AdminBot {
         this.floodTracker = new Map()
         this.unbanStates = new Map()  // userId -> waiting_unban_id
 
-        // Инициализация VK Bridge
-        if (config.vkToken && config.vkGroupId && config.vkGroupId !== "YOUR_VK_GROUP_ID_HERE") {
-            this.vkBridge = new VKBridge(this.bot)
-            this.vkBridge.startPolling()
-            logger.info("VK Bridge initialized and Long Poll started")
-        } else {
-            this.vkBridge = null
-            logger.warn("VK Bridge disabled: VK_TOKEN or VK_GROUP_ID not set in .env")
+        // Инициализация VK Bridge(s) — поддержка нескольких ВК групп
+        this.vkBridges = []  // все активные мосты
+        this.vkBridge = null  // основной (первый) для обратной совместимости
+
+        // Собираем все пары VK_GROUP_ID_N / VK_TOKEN_N из env
+        const vkPairs = []
+
+        // Сначала проверяем нумерованные: VK_GROUP_ID_1, VK_GROUP_ID_2, ...
+        for (let i = 1; i <= 30; i++) {
+            const groupId = process.env[`VK_GROUP_ID_${i}`]
+            const token = process.env[`VK_TOKEN_${i}`]
+            const userToken = process.env[`VK_USER_TOKEN_${i}`]
+            if (groupId && token) {
+                vkPairs.push({ groupId, token, userToken, index: i })
+            }
         }
 
-        // SuggestionsManager получает vkBridge для публикации одобренных предложений в ВК
+        // Если нет нумерованных — используем старые VK_GROUP_ID / VK_TOKEN
+        if (vkPairs.length === 0 && config.vkToken && config.vkGroupId && config.vkGroupId !== "YOUR_VK_GROUP_ID_HERE") {
+            vkPairs.push({ groupId: config.vkGroupId, token: config.vkToken, userToken: process.env.VK_USER_TOKEN, index: 0 })
+        }
+
+        for (const pair of vkPairs) {
+            try {
+                const bridge = new VKBridge(this.bot, pair.groupId, pair.token, pair.userToken)
+                bridge.startPolling()
+                this.vkBridges.push(bridge)
+                if (!this.vkBridge) this.vkBridge = bridge  // первый = основной
+                logger.info(`VK Bridge #${pair.index} initialized for group ${pair.groupId}`)
+            } catch (e) {
+                logger.error(`VK Bridge #${pair.index} init failed:`, e)
+            }
+        }
+
+        if (this.vkBridges.length === 0) {
+            logger.warn("VK Bridge disabled: no VK_GROUP_ID/VK_TOKEN found in .env")
+        }
+
+        // SuggestionsManager получает основной vkBridge
         this.suggestionsManager = new SuggestionsManager(this.bot, this.vkBridge)
 
         this.setupHandlers()
@@ -225,25 +253,31 @@ class AdminBot {
             }
 
             // ✅ Кросс-постинг: новый пост в TG канале → ВК
-            if (this.vkBridge) {
+            // Ищем VKBridge привязанный к этому TG каналу
+            const vkBridgeForChannel = this.vkBridges.find(b => {
+                // channel.vk_group_id должен совпадать с b.vkGroupId
+                return channel.vk_group_id && String(channel.vk_group_id) === String(b.vkGroupId)
+            }) || this.vkBridge  // fallback на основной
+
+            if (vkBridgeForChannel) {
                 if (!msg.media_group_id) {
                     // Одиночное сообщение
-                    await this.vkBridge.handleTelegramChannelPost(msg)
+                    await vkBridgeForChannel.handleTelegramChannelPost(msg)
                 } else {
                     // Медиагруппа — собираем ВСЕ сообщения, потом отправляем
                     if (!this._tgMediaGroupCache) this._tgMediaGroupCache = new Map()
 
                     if (!this._tgMediaGroupCache.has(msg.media_group_id)) {
-                        this._tgMediaGroupCache.set(msg.media_group_id, [])
+                        this._tgMediaGroupCache.set(msg.media_group_id, { msgs: [], bridge: vkBridgeForChannel })
                         setTimeout(async () => {
-                            const msgs = this._tgMediaGroupCache.get(msg.media_group_id)
-                            if (msgs && msgs.length > 0 && this.vkBridge) {
-                                await this.vkBridge.handleTelegramMediaGroup(msgs)
+                            const entry = this._tgMediaGroupCache.get(msg.media_group_id)
+                            if (entry && entry.msgs.length > 0 && entry.bridge) {
+                                await entry.bridge.handleTelegramMediaGroup(entry.msgs)
                             }
                             this._tgMediaGroupCache.delete(msg.media_group_id)
                         }, 2500)
                     }
-                    this._tgMediaGroupCache.get(msg.media_group_id).push(msg)
+                    this._tgMediaGroupCache.get(msg.media_group_id).msgs.push(msg)
                 }
             }
         } catch (error) {
@@ -431,38 +465,31 @@ class AdminBot {
             }
 
             // ✅ Обработка действий с предложениями из ВК
-            if (data.startsWith("vk_approve_guide_")) {
-                const postId = parseInt(data.replace("vk_approve_guide_", ""))
-                if (this.vkBridge) await this.vkBridge.approveVkSuggestWithGuide(postId, query)
-                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
-                return
-            }
+            if (data.startsWith("vk_approve_guide_") || data.startsWith("vk_approve_") ||
+                data.startsWith("vk_reject_") || data.startsWith("vk_ban_") || data.startsWith("vk_forward_")) {
+                // Находим нужный bridge по postId (ищем в pendingVkSuggestions всех bridge)
+                let postId, targetBridge = null
+                if (data.startsWith("vk_approve_guide_")) postId = parseInt(data.replace("vk_approve_guide_", ""))
+                else if (data.startsWith("vk_approve_")) postId = parseInt(data.replace("vk_approve_", ""))
+                else if (data.startsWith("vk_reject_")) postId = parseInt(data.replace("vk_reject_", ""))
+                else if (data.startsWith("vk_ban_")) postId = parseInt(data.replace("vk_ban_", ""))
+                else if (data.startsWith("vk_forward_")) postId = parseInt(data.replace("vk_forward_", ""))
 
-            if (data.startsWith("vk_approve_")) {
-                const postId = parseInt(data.replace("vk_approve_", ""))
-                if (this.vkBridge) await this.vkBridge.approveVkSuggest(postId, query)
-                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
-                return
-            }
+                for (const b of this.vkBridges) {
+                    if (b.pendingVkSuggestions.has(postId)) { targetBridge = b; break }
+                }
+                if (!targetBridge) targetBridge = this.vkBridge
 
-            if (data.startsWith("vk_reject_")) {
-                const postId = parseInt(data.replace("vk_reject_", ""))
-                if (this.vkBridge) await this.vkBridge.rejectVkSuggest(postId, query)
-                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
-                return
-            }
+                if (!targetBridge) {
+                    await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
+                    return
+                }
 
-            if (data.startsWith("vk_ban_")) {
-                const postId = parseInt(data.replace("vk_ban_", ""))
-                if (this.vkBridge) await this.vkBridge.banVkSuggestAuthor(postId, query)
-                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
-                return
-            }
-
-            if (data.startsWith("vk_forward_")) {
-                const postId = parseInt(data.replace("vk_forward_", ""))
-                if (this.vkBridge) await this.vkBridge.forwardVkSuggestToMainAdmin(postId, query)
-                else await this.bot.answerCallbackQuery(query.id, { text: "VK Bridge не инициализирован" })
+                if (data.startsWith("vk_approve_guide_")) await targetBridge.approveVkSuggestWithGuide(postId, query)
+                else if (data.startsWith("vk_approve_")) await targetBridge.approveVkSuggest(postId, query)
+                else if (data.startsWith("vk_reject_")) await targetBridge.rejectVkSuggest(postId, query)
+                else if (data.startsWith("vk_ban_")) await targetBridge.banVkSuggestAuthor(postId, query)
+                else if (data.startsWith("vk_forward_")) await targetBridge.forwardVkSuggestToMainAdmin(postId, query)
                 return
             }
 
@@ -608,7 +635,22 @@ class AdminBot {
                     break
 
                 default:
-                    if (data.startsWith("settings_")) {
+                    if (data.startsWith("link_vk_")) {
+                        // link_vk_{channelId}_{vkGroupId}
+                        const parts = data.split("_")
+                        const channelDbId = parts[2]
+                        const vkGroupId = parts[3]
+                        const channels = await db.getChannels()
+                        const channel = channels.find(c => c.id === parseInt(channelDbId))
+                        if (channel) {
+                            await db.setChannelVkGroup(channel.chat_id, vkGroupId)
+                            await this.bot.sendMessage(chatId,
+                                `✅ Канал *${channel.title || channel.username}* привязан к ВК группе vk.com/club${vkGroupId}`,
+                                { parse_mode: "Markdown", ...keyboards.backToMain }
+                            )
+                            logger.info(`Channel ${channel.chat_id} linked to VK group ${vkGroupId}`)
+                        }
+                    } else if (data.startsWith("settings_")) {
                         const channelId = data.split("_")[1]
                         await this.showSpecificChannelSettings(chatId, channelId)
                     }
@@ -717,12 +759,21 @@ class AdminBot {
                 ? `✅ Подключён (группа ID: ${config.vkGroupId})`
                 : `❌ Не подключён`
 
+            let vkBridgesStatus = ""
+            if (this.vkBridges.length > 1) {
+                vkBridgesStatus = "\n\n*Активные VK группы:*\n"
+                this.vkBridges.forEach((b, i) => {
+                    const linked = channels.find(c => c.vk_group_id === String(b.vkGroupId))
+                    vkBridgesStatus += `${i+1}. vk.com/club${b.vkGroupId} → ${linked ? (linked.title || linked.username) : "не привязан"}\n`
+                })
+            }
+
             const message =
                 `📊 *Статистика бота*\n\n` +
                 `📋 Каналов подключено: ${channels.length}\n` +
                 `🛡️ Модерация активна: ${channels.filter((c) => c.moderation_enabled).length}\n` +
                 `📝 Предложения активны: ${channels.filter((c) => c.suggestions_enabled).length}\n\n` +
-                `🔵 *ВКонтакте:* ${vkStatus}`
+                `🔵 *ВКонтакте:* ${vkStatus}` + vkBridgesStatus
 
             await this.bot.sendMessage(chatId, message, {
                 parse_mode: "Markdown",
@@ -773,11 +824,40 @@ class AdminBot {
     }
 
     async showSpecificChannelSettings(chatId, channelId) {
-        await this.bot.sendMessage(
-            chatId,
-            "⚙️ Настройки канала будут добавлены в следующем обновлении",
-            keyboards.backToMain,
-        )
+        try {
+            const channels = await db.getChannels()
+            const channel = channels.find(c => c.id === parseInt(channelId))
+            if (!channel) {
+                await this.bot.sendMessage(chatId, "❌ Канал не найден", keyboards.backToMain)
+                return
+            }
+
+            const linkedVk = channel.vk_group_id
+                ? `🔗 Привязана ВК группа: vk.com/club${channel.vk_group_id}`
+                : `🔗 ВК группа: не привязана`
+
+            // Показываем доступные VK группы для привязки
+            const vkButtons = this.vkBridges.map(b => ([{
+                text: `🔗 Привязать vk.com/club${b.vkGroupId}`,
+                callback_data: `link_vk_${channelId}_${b.vkGroupId}`
+            }]))
+
+            const keyboard = {
+                reply_markup: {
+                    inline_keyboard: [
+                        ...vkButtons,
+                        [{ text: "🔙 Назад", callback_data: "admin_channels" }]
+                    ]
+                }
+            }
+
+            await this.bot.sendMessage(chatId,
+                `⚙️ *Настройки канала: ${channel.title || channel.username}*\n\n${linkedVk}\n\nВыберите ВК группу для привязки:`,
+                { parse_mode: "Markdown", ...keyboard }
+            )
+        } catch (e) {
+            logger.error("showSpecificChannelSettings error:", e)
+        }
     }
 
     async _resolveUsername(usernameWithAt) {

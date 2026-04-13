@@ -37,6 +37,7 @@ class Database {
         suggestions_enabled BOOLEAN DEFAULT 1,
         rules_message TEXT,
         max_warnings INTEGER DEFAULT 3,
+        vk_group_id TEXT DEFAULT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
 
@@ -100,7 +101,8 @@ class Database {
       `ALTER TABLE scheduled_messages ADD COLUMN media_group_id TEXT`,
       `ALTER TABLE scheduled_messages ADD COLUMN all_message_ids TEXT`,
       `ALTER TABLE scheduled_messages ADD COLUMN media_files TEXT`,
-      `ALTER TABLE banned_users ADD COLUMN username TEXT`
+      `ALTER TABLE banned_users ADD COLUMN username TEXT`,
+      `ALTER TABLE channels ADD COLUMN vk_group_id TEXT DEFAULT NULL`
     ]
 
     alterQueries.forEach((sql) => {
@@ -385,6 +387,24 @@ class Database {
       this.db.all(`SELECT * FROM banned_users ORDER BY created_at DESC`, (err, rows) => {
         if (err) reject(err)
         else resolve(rows)
+      })
+    })
+  }
+
+  setChannelVkGroup(chatId, vkGroupId) {
+    return new Promise((resolve, reject) => {
+      this.db.run(`UPDATE channels SET vk_group_id = ? WHERE chat_id = ?`, [vkGroupId, chatId], function(err) {
+        if (err) reject(err)
+        else resolve(this.changes)
+      })
+    })
+  }
+
+  getChannelByVkGroup(vkGroupId) {
+    return new Promise((resolve, reject) => {
+      this.db.get(`SELECT * FROM channels WHERE vk_group_id = ?`, [String(vkGroupId)], (err, row) => {
+        if (err) reject(err)
+        else resolve(row)
       })
     })
   }

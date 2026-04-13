@@ -19,11 +19,12 @@ const logger = require("../utils/logger")
 const config = require("../config/config")
 
 class VKBridge {
-  constructor(bot) {
+  constructor(bot, vkGroupId = null, vkToken = null, vkUserToken = null) {
     this.bot = bot
-    this.vkToken = config.vkToken
-    this.vkGroupId = config.vkGroupId
-    this.vkUserToken = config.vkUserToken || process.env.VK_USER_TOKEN || null  // пользовательский токен для загрузки фото
+    // Поддержка как прямых параметров так и config (обратная совместимость)
+    this.vkToken = vkToken || config.vkToken
+    this.vkGroupId = vkGroupId || config.vkGroupId
+    this.vkUserToken = vkUserToken || config.vkUserToken || process.env.VK_USER_TOKEN || null
 
     // Дедупликация
     this.processedVkPosts = new Set()
@@ -307,7 +308,17 @@ class VKBridge {
   async postToTelegram(text, photoUrls = [], dedupeKey = null, videoData = []) {
     try {
       const db = require("../database/database")
-      const channels = await db.getChannels()
+      let channels = []
+
+      // Если у этой VK группы есть привязанный TG канал — постим только в него
+      const linkedChannel = await db.getChannelByVkGroup(String(this.vkGroupId))
+      if (linkedChannel) {
+        channels = [linkedChannel]
+        logger.info(`postToTelegram: using linked channel ${linkedChannel.chat_id} for VK group ${this.vkGroupId}`)
+      } else {
+        // Иначе постим во все каналы (обратная совместимость)
+        channels = await db.getChannels()
+      }
 
       if (channels.length === 0) {
         logger.warn("postToTelegram: no TG channels configured")
@@ -742,7 +753,9 @@ class VKBridge {
       const finalTextVk = baseText + videoLinksText + guideVkText
 
       const db = require("../database/database")
-      const channels = await db.getChannels()
+      // Постим только в канал привязанный к этой VK группе
+      const linkedChannel = await db.getChannelByVkGroup(String(this.vkGroupId))
+      const channels = linkedChannel ? [linkedChannel] : await db.getChannels()
       const photoBuffers = suggestionData.photoBuffers || []
 
       // Шаг 1: постим в TG каналы, собираем file_id из первого канала
