@@ -67,8 +67,8 @@ class AdminBot {
             logger.warn("VK Bridge disabled: no VK_GROUP_ID/VK_TOKEN found in .env")
         }
 
-        // SuggestionsManager получает основной vkBridge
-        this.suggestionsManager = new SuggestionsManager(this.bot, this.vkBridge)
+        // SuggestionsManager получает все vkBridges для маршрутизации по каналам
+        this.suggestionsManager = new SuggestionsManager(this.bot, this.vkBridges)
 
         this.setupHandlers()
         logger.info("Admin bot started successfully")

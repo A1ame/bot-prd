@@ -4,9 +4,16 @@ const logger = require("../utils/logger")
 const config = require("../config/config")
 
 class SuggestionsManager {
-    constructor(bot, vkBridge = null) {
+    constructor(bot, vkBridges = null) {
         this.bot = bot
-        this.vkBridge = vkBridge
+        // Принимаем как массив bridges, так и одиночный bridge (обратная совместимость)
+        if (Array.isArray(vkBridges)) {
+            this.vkBridges = vkBridges
+            this.vkBridge = vkBridges[0] || null  // первый = основной для обратной совместимости
+        } else {
+            this.vkBridges = vkBridges ? [vkBridges] : []
+            this.vkBridge = vkBridges || null
+        }
         this.userStates = new Map()
         this.mediaGroupCache = new Map()
         this.cancelMessages = new Map()
@@ -558,8 +565,28 @@ class SuggestionsManager {
 
     // Отправить одобренное предложение в ВК
     async _postSuggestionToVk(suggestion, extraText = "") {
-        if (!this.vkBridge) return
+        if (!this.vkBridges || this.vkBridges.length === 0) return
         try {
+            // Находим правильный VK bridge по vk_group_id канала
+            let bridge = this.vkBridge  // fallback на первый
+            if (suggestion.chat_id) {
+                const channels = await db.getChannels()
+                const channel = channels.find(ch => {
+                    const chId = ch.chat_id.startsWith('-') ? ch.chat_id.slice(1) : ch.chat_id
+                    const sugId = suggestion.chat_id.startsWith('-') ? suggestion.chat_id.slice(1) : suggestion.chat_id
+                    return chId === sugId
+                })
+                if (channel && channel.vk_group_id) {
+                    const matched = this.vkBridges.find(b => String(b.vkGroupId) === String(channel.vk_group_id))
+                    if (matched) {
+                        bridge = matched
+                        logger.info(`_postSuggestionToVk: routing suggestion #${suggestion.id} to VK group ${bridge.vkGroupId} (channel: ${channel.title || channel.username})`)
+                    } else {
+                        logger.warn(`_postSuggestionToVk: no VK bridge found for group ${channel.vk_group_id}, using default`)
+                    }
+                }
+            }
+            if (!bridge) return
             const text = (suggestion.caption || "") + (extraText ? "\n\n" + extraText : "")
             const photoBuffers = []
 
@@ -569,7 +596,7 @@ class SuggestionsManager {
                     try {
                         const fileInfo = await this.bot.getFile(item.media)
                         const fileUrl = `https://api.telegram.org/file/bot${require("../config/config").botToken}/${fileInfo.file_path}`
-                        const buffer = await this.vkBridge.downloadFile(fileUrl)
+                        const buffer = await bridge.downloadFile(fileUrl)
                         const isVideo = item.type === "video"
                         photoBuffers.push({ buffer, filename: isVideo ? "video.mp4" : "photo.jpg", type: item.type })
                     } catch (e) {
@@ -584,7 +611,7 @@ class SuggestionsManager {
                         const photo = fwd.photo[fwd.photo.length - 1]
                         const fileInfo = await this.bot.getFile(photo.file_id)
                         const fileUrl = `https://api.telegram.org/file/bot${require("../config/config").botToken}/${fileInfo.file_path}`
-                        const buffer = await this.vkBridge.downloadFile(fileUrl)
+                        const buffer = await bridge.downloadFile(fileUrl)
                         photoBuffers.push({ buffer, filename: "photo.jpg" })
                         // Удаляем пересланное сообщение
                         try { await this.bot.deleteMessage(require("../config/config").adminChatId, fwd.message_id) } catch(e) {}
@@ -595,7 +622,7 @@ class SuggestionsManager {
             }
 
             const dedupeKey = `suggest_approved_${suggestion.id}`
-            await this.vkBridge.postToVk(text, photoBuffers, dedupeKey)
+            await bridge.postToVk(text, photoBuffers, dedupeKey)
             logger.info(`Suggestion #${suggestion.id} posted to VK`)
         } catch (error) {
             logger.error("_postSuggestionToVk error:", error)
