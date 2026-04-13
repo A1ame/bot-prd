@@ -644,7 +644,13 @@ class SuggestionsManager {
         try {
             const cleanChannelId = channel.chat_id.startsWith('-') ? channel.chat_id.slice(1) : channel.chat_id;
             const suggestLink = `https://t.me/${config.botName}?start=${cleanChannelId}_channel`;
-            const textToSend = (suggestion.caption || "") +`\n\n📒 Хочешь чтобы твое сообщение попало в канал, пиши сюда <a href="${suggestLink}">сюда</a>\n Эту ссылку так же можно найти в описании канала`;
+
+            // Гайд для Telegram канала (с HTML-ссылкой)
+            const tgGuide = `\n\n📒 Хочешь чтобы твое сообщение попало в канал, пиши <a href="${suggestLink}">сюда</a>\n Эту ссылку так же можно найти в описании канала`;
+            const textToSend = (suggestion.caption || "") + tgGuide;
+
+            // Гайд для ВКонтакте (без HTML)
+            const vkGuide = `Если ты хочешь, чтобы новость попала в Подслушку, пролистай вверх и нажми на кнопку "Предложить новость"`;
 
             if (suggestion.content_type === "album" && suggestion.file_ids) {
                 const parsedMedia = this._parseFileIds(suggestion.file_ids)
@@ -683,8 +689,8 @@ class SuggestionsManager {
                 await this.bot.sendMessage(suggestion.user_id, "✅ Ваше предложение было одобрено и опубликовано!");
             }
 
-            // Публикуем в ВК
-            await this._postSuggestionToVk(suggestion)
+            // Публикуем в ВК с гайдом для ВК
+            await this._postSuggestionToVk(suggestion, vkGuide)
             await this.bot.answerCallbackQuery(callbackQuery.id, { text: "Предложение одобрено с гайдом!" });
         } catch (error) {
             console.error("Error approving suggestion with guide:", error);
